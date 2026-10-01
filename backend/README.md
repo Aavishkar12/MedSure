@@ -22,7 +22,15 @@ start without any accounts.
 - Real: `Authorization: Bearer <Firebase ID token>`
 - Dev (`AUTH_DEV_BYPASS=true`): `X-User-Id: <any name>`
 
-After sign-in the app calls `POST /devices` with its FCM token, and `DELETE /devices/{token}` on sign-out.
+After sign-in the app calls `PATCH /me` with the sign-up details (`name`, `phone`, `email`), then
+`POST /devices` with its FCM token. On sign-out it calls `DELETE /devices/{token}`.
+
+## Family circle
+
+- `POST /cases` with `relation: "self"` when the patient signs up, or `son`, `daughter`... for family.
+- `POST /cases/{id}/members` adds someone by phone or email. If they have no account yet they show up
+  as `pending` and join automatically when they sign in with that phone or email.
+- `can_approve: false` makes a member view-only: they cannot approve drafts.
 
 ## Layout
 

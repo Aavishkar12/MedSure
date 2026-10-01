@@ -4,7 +4,7 @@ import base64
 import json
 from pathlib import Path
 
-from groq import Groq
+from groq import APIError, Groq, RateLimitError
 
 from ..config import settings
 
@@ -47,30 +47,44 @@ def file_to_images(path: str) -> list[bytes]:
 
 
 def _messages(system: str, user: str, images: list[bytes] | None) -> list[dict]:
+    if not images:  # text-only models reject list content
+        return [{"role": "system", "content": system}, {"role": "user", "content": user}]
     content: list[dict] = [{"type": "text", "text": user}]
-    for i, img in enumerate(images or [], start=1):
+    for i, img in enumerate(images, start=1):
         content.append({"type": "text", "text": f"[Page {i}]"})
         url = "data:image/jpeg;base64," + base64.b64encode(img).decode()
         content.append({"type": "image_url", "image_url": {"url": url}})
     return [{"role": "system", "content": system}, {"role": "user", "content": content}]
 
 
+class LLMError(RuntimeError):
+    """Message is safe to show to the user."""
+
+
+def _chat(**kwargs) -> str:
+    if kwargs["model"].startswith("openai/gpt-oss"):  # reasoning models; keep them quick
+        kwargs["reasoning_effort"] = "low"
+    try:
+        resp = _groq().chat.completions.create(**kwargs)
+    except RateLimitError as e:
+        raise LLMError("The AI service is busy right now. Please try again in a minute.") from e
+    except APIError as e:
+        raise LLMError("The AI service could not process this request.") from e
+    return resp.choices[0].message.content or ""
+
+
 def complete_json(system: str, user: str, images: list[bytes] | None = None) -> dict:
     """One call that returns a JSON object. The system prompt must describe the schema."""
     model = settings.groq_vision_model if images else settings.groq_text_model
-    resp = _groq().chat.completions.create(
-        model=model,
-        messages=_messages(system, user, images),
-        response_format={"type": "json_object"},
-        temperature=0,
+    return json.loads(
+        _chat(
+            model=model,
+            messages=_messages(system, user, images),
+            response_format={"type": "json_object"},
+            temperature=0,
+        )
     )
-    return json.loads(resp.choices[0].message.content)
 
 
 def complete_text(system: str, user: str) -> str:
-    resp = _groq().chat.completions.create(
-        model=settings.groq_text_model,
-        messages=_messages(system, user, None),
-        temperature=0.2,
-    )
-    return resp.choices[0].message.content
+    return _chat(model=settings.groq_text_model, messages=_messages(system, user, None), temperature=0.2)

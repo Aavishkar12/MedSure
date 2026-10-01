@@ -3,7 +3,7 @@ from pydantic import BaseModel
 from sqlmodel import Session
 
 from ..db import get_session
-from ..deps import current_user
+from ..deps import claim_invites, clean_email, clean_phone, current_user
 from ..models import Device, User, now
 
 router = APIRouter(tags=["account"])
@@ -14,8 +14,30 @@ class DeviceRegister(BaseModel):
     platform: str = "android"
 
 
+class ProfileUpdate(BaseModel):
+    name: str | None = None
+    phone: str | None = None
+    email: str | None = None
+
+
 @router.get("/me", response_model=User)
 def me(user: User = Depends(current_user)):
+    return user
+
+
+@router.patch("/me", response_model=User)
+def update_me(body: ProfileUpdate, user: User = Depends(current_user), session: Session = Depends(get_session)):
+    """Save sign-up details. Also joins any case this phone or email was invited to."""
+    if body.name is not None:
+        user.name = body.name.strip()
+    if body.phone is not None:
+        user.phone = clean_phone(body.phone)
+    if body.email is not None:
+        user.email = clean_email(body.email)
+    session.add(user)
+    claim_invites(session, user)
+    session.commit()
+    session.refresh(user)
     return user
 
 

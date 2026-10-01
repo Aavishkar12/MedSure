@@ -1,10 +1,14 @@
+from typing import Literal
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
+from .. import llm
+from ..config import settings
 from ..db import get_session
 from ..deps import add_event, current_user, require_member
-from ..models import ChecklistItem, Claim, Document, Draft, User, now
+from ..models import BillItem, Case, CaseMember, ChecklistItem, Claim, DischargeCard, Document, Draft, User, now
 from ..notify import notify_case
 
 router = APIRouter(tags=["claims"])
@@ -104,7 +108,28 @@ def update_claim_status(
 
 
 class DraftCreate(BaseModel):
-    kind: str = "claim_letter"  # claim_letter | appeal_letter
+    kind: Literal["claim_letter", "appeal_letter"] = "claim_letter"
+    notes: str = ""  # from the family, e.g. the reason the insurer gave for a denial
+
+
+def _letter_facts(session: Session, claim: Claim, notes: str) -> dict:
+    case = session.get(Case, claim.case_id)
+    card = session.exec(
+        select(DischargeCard).where(DischargeCard.case_id == claim.case_id).order_by(DischargeCard.id.desc())
+    ).first()
+    bill_total = sum(session.exec(select(BillItem.amount).where(BillItem.case_id == claim.case_id)).all())
+    checklist = _claim_out(session, claim).checklist
+    return {
+        "patient_name": case.patient_name,
+        "insurer": claim.insurer or None,
+        "claim_type": claim.mode,
+        "claim_status": claim.status,
+        "diagnosis": card.data.get("diagnosis", {}).get("name") if card else None,
+        "bill_total": f"Rs {bill_total:,.2f}" if bill_total else None,
+        "documents_enclosed": [c.label for c in checklist if c.present],
+        "documents_missing": [c.label for c in checklist if not c.present],
+        "notes_from_family": notes or None,
+    }
 
 
 class DraftEdit(BaseModel):
@@ -116,8 +141,13 @@ def create_draft(
     claim_id: int, body: DraftCreate, user: User = Depends(current_user), session: Session = Depends(get_session)
 ):
     claim = _get_claim(session, claim_id, user)
-    # STUB: replace with app.llm draft_letter() using the Discharge Card + bill.
-    text = f"To the Claims Manager, {claim.insurer or '[Insurer]'}\n\n[AI-drafted {body.kind.replace('_', ' ')} goes here]"
+    if settings.groq_api_key:
+        try:
+            text = llm.draft_letter(body.kind, _letter_facts(session, claim, body.notes))
+        except llm.LLMError as e:
+            raise HTTPException(503, str(e))
+    else:  # canned placeholder when no key is set
+        text = f"To the Claims Manager, {claim.insurer or '[Insurer]'}\n\n[AI-drafted {body.kind.replace('_', ' ')} goes here]"
     draft = Draft(case_id=claim.case_id, claim_id=claim.id, kind=body.kind, body=text)
     session.add(draft)
     session.flush()
@@ -156,6 +186,8 @@ def approve_draft(draft_id: int, user: User = Depends(current_user), session: Se
     draft = _get_draft(session, draft_id, user)
     if draft.status != "draft":
         raise HTTPException(409, f"Draft is already {draft.status}")
+    if not session.get(CaseMember, (draft.case_id, user.id)).can_approve:
+        raise HTTPException(403, "You can view this case but not approve for it")
     draft.status, draft.approved_by, draft.approved_at = "approved", user.id, now()
     session.add(draft)
     add_event(session, draft.case_id, "draft", f"{draft.kind.replace('_', ' ').capitalize()} approved", draft.id)

@@ -1,4 +1,5 @@
 import hashlib
+import json
 from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
@@ -180,6 +181,16 @@ def bill(case_id: int, user: User = Depends(current_user), session: Session = De
     return BillOut(total=sum(i.amount for i in items), items=items)
 
 
+def _qa_text(session: Session, doc: Document) -> str:
+    """The document's own text, or its extracted data when it was read from images."""
+    if doc.text:
+        return doc.text
+    cards = session.exec(select(DischargeCard).where(DischargeCard.document_id == doc.id)).all()
+    items = session.exec(select(BillItem).where(BillItem.document_id == doc.id)).all()
+    data = [c.data for c in cards] + [i.model_dump(include={"description", "amount", "explanation"}) for i in items]
+    return json.dumps(data) if data else ""
+
+
 class Question(BaseModel):
     question: str
 
@@ -193,5 +204,11 @@ class Answer(BaseModel):
 @router.post("/cases/{case_id}/ask", response_model=Answer)
 def ask(case_id: int, body: Question, user: User = Depends(current_user), session: Session = Depends(get_session)):
     require_member(session, case_id, user)
-    # STUB: replace with grounded Q&A over this case's extracted documents.
-    return Answer(answer="I could not find that in your uploaded documents.", sources=[], grounded=False)
+    if not settings.groq_api_key:
+        return Answer(answer=llm.qa.NOT_FOUND, sources=[], grounded=False)
+    ready = session.exec(select(Document).where(Document.case_id == case_id, Document.status == "ready")).all()
+    docs = [{"id": d.id, "doc_type": d.doc_type, "text": _qa_text(session, d)} for d in ready]
+    try:
+        return llm.answer_question(body.question, [d for d in docs if d["text"]])
+    except llm.LLMError as e:
+        raise HTTPException(503, str(e))

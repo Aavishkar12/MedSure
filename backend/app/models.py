@@ -15,6 +15,7 @@ class User(SQLModel, table=True):
     id: str = Field(primary_key=True)  # Firebase uid
     name: str = ""
     email: Optional[str] = Field(default=None, index=True)
+    phone: Optional[str] = Field(default=None, index=True)  # 10 digits, no country code
 
 
 class Device(SQLModel, table=True):
@@ -34,7 +35,22 @@ class Case(SQLModel, table=True):
 class CaseMember(SQLModel, table=True):
     case_id: int = Field(foreign_key="case.id", primary_key=True)
     user_id: str = Field(foreign_key="user.id", primary_key=True)
-    role: str = "family"  # patient | family
+    relation: str = "self"  # "self" is the patient; otherwise son, daughter, spouse, ...
+    can_approve: bool = True  # may approve drafts; False is view-only
+
+
+class Invite(SQLModel, table=True):
+    """A family member added before they have signed in. Becomes a CaseMember when they do."""
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    case_id: int = Field(foreign_key="case.id", index=True)
+    name: str
+    relation: str = "family"
+    can_approve: bool = True
+    phone: Optional[str] = Field(default=None, index=True)
+    email: Optional[str] = Field(default=None, index=True)
+    invited_by: str = Field(foreign_key="user.id")
+    created_at: datetime = Field(default_factory=now)
 
 
 class Document(SQLModel, table=True):

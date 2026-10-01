@@ -81,6 +81,11 @@ Rules:
 - Use ONLY what is written in the document. If something is not there, leave it empty. Never guess.
 - Do not diagnose, predict outcomes, or recommend treatment. Explain what the document already says.
 - Write explanations for someone with no medical background, one or two short sentences each.
+  Use everyday words ("protects the stomach from acid", not "acid suppression") and say what a
+  medical term means the first time you use it. Never sound alarming or judgemental.
+- For a medicine's purpose, say what that kind of medicine is generally used for.
+- For a lab value, say what the test measures and whether the document shows it as low, normal or high.
+  If a value was measured more than once, use the latest and mention the earlier one in "plain".
 - source_page is the number from the nearest [Page N] marker, or null if unknown.
 - concept must be one of {CONCEPTS} or null.
 Reply with a single JSON object matching this JSON Schema:
