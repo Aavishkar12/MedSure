@@ -32,10 +32,11 @@ def create_checkin(
     session.commit()
     session.refresh(checkin)
     if flags:
-        notify_case(
-            session, case_id, "MedSure", "Today's check-in needs attention.", "checkin", checkin.id,
-            exclude_user_id=user.id,
-        )
+        urgent = any(f.get("severity") == "urgent" for f in flags)
+        body = "Today's check-in needs help now." if urgent else "Today's check-in needs attention."
+        # call_phone lets the family's notification offer a "Call" button for whoever checked in.
+        extra = {"severity": "urgent" if urgent else "attention", "call_name": user.name, "call_phone": user.phone or ""}
+        notify_case(session, case_id, "MedSure", body, "checkin", checkin.id, exclude_user_id=user.id, extra=extra)
     return checkin
 
 

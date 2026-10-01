@@ -7,12 +7,13 @@ plugins {
     id("com.google.gms.google-services")
 }
 
-// Backend address. Override per machine in local.properties: medsure.apiUrl=http://192.168.1.20:8000
-// The default reaches a backend running on the same computer as the emulator.
+// Backend addresses, comma separated; the app uses the first one that answers.
+// Override per machine in local.properties: medsure.apiUrl=http://192.168.1.20:8000
+// Defaults: a laptop sharing its connection through Windows Mobile Hotspot, then the emulator's host.
 val localProps = Properties().apply {
     rootProject.file("local.properties").takeIf { it.exists() }?.inputStream()?.use { load(it) }
 }
-val apiUrl: String = localProps.getProperty("medsure.apiUrl") ?: "http://10.0.2.2:8000"
+val apiUrl: String = localProps.getProperty("medsure.apiUrl") ?: "http://192.168.137.1:8000,http://10.0.2.2:8000"
 
 android {
     namespace = "com.powerbank.medsure"

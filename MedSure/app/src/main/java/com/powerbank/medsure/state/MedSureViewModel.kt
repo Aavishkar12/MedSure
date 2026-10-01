@@ -13,6 +13,7 @@ import androidx.lifecycle.viewModelScope
 import com.powerbank.medsure.i18n.AllLanguages
 import com.powerbank.medsure.i18n.Tx
 import com.powerbank.medsure.net.Backend
+import com.powerbank.medsure.push.PushBus
 import com.powerbank.medsure.ui.theme.Ms
 import kotlinx.coroutines.launch
 
@@ -23,7 +24,7 @@ enum class PTab { Today, Care, Checkin, Help }
 enum class FTab { Home, Meds, Bills, Claim, Care }
 enum class Sheet { Query, Approve }
 
-data class Member(val name: String, val rel: String, val role: String, val you: Boolean)
+data class Member(val name: String, val rel: String, val role: String, val you: Boolean, val phone: String = "")
 
 data class Dose(
     val id: String, val name: String, val time: String, val what: String, val why: String, val taken: Boolean,
@@ -147,6 +148,22 @@ class MedSureViewModel : ViewModel() {
     /** The case this user is on, once the backend has confirmed it. */
     var caseId by mutableStateOf<Int?>(null)
 
+    init {
+        viewModelScope.launch { PushBus.events.collect { refresh() } }
+    }
+
+    /** Pulls what other family members did. Called when the app comes to the front and when a push arrives. */
+    fun refresh() {
+        if (stage != Stage.App || !Backend.signedIn) return
+        sync("Refresh") {
+            // Family joins a case when the patient invites them, which can happen after they signed in.
+            val id = caseId ?: Backend.firstCaseId()?.also { caseId = it } ?: return@sync
+            if (!isPatient) Backend.latestCheckinLevels(id)?.let { levels ->
+                ans.clear(); ans.addAll(levels); step = 3
+            }
+        }
+    }
+
     /** Runs a backend call without blocking the screens, which keep working if it fails. */
     private fun sync(what: String, block: suspend () -> Unit) {
         viewModelScope.launch {
@@ -170,7 +187,7 @@ class MedSureViewModel : ViewModel() {
 
     fun submitAdd() {
         if (!canAdd) return
-        val added = Member(fName.trim(), fRel, if (isPatient) "approve" else fRole, false)
+        val added = Member(fName.trim(), fRel, if (isPatient) "approve" else fRole, false, fPhone)
         members.add(added)
         overlay = if (prevOverlay == Overlay.Settings) Overlay.Settings else null
 

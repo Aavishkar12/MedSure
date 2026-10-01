@@ -61,12 +61,43 @@ object Backend {
         request("POST", "/cases/$caseId/checkins", JSONObject().put("answers", answers))
     }
 
+    /** Answer levels of the most recent check-in on this case, or null if there is none yet. */
+    suspend fun latestCheckinLevels(caseId: Int): List<Int>? {
+        val all = JSONArray(request("GET", "/cases/$caseId/checkins"))
+        if (all.length() == 0) return null
+        val levels = all.getJSONObject(all.length() - 1).getJSONObject("answers").optJSONArray("levels") ?: return null
+        return List(levels.length()) { levels.getInt(it) }
+    }
+
     private suspend fun pushToken(): String = FirebaseMessaging.getInstance().token.await()
+
+    private var base: String? = null
+
+    /**
+     * API_URL may list several addresses separated by commas; the first one that answers is used.
+     * That lets one build work on the laptop's hotspot, on shared wifi and against a hosted server.
+     */
+    private suspend fun baseUrl(): String = base ?: withContext(Dispatchers.IO) {
+        val candidates = BuildConfig.API_URL.split(',').map { it.trim().trimEnd('/') }.filter { it.isNotEmpty() }
+        candidates.firstOrNull(::reachable) ?: throw IOException("Backend not reachable at any of $candidates")
+    }.also { base = it }
+
+    private fun reachable(url: String): Boolean = runCatching {
+        val conn = URL("$url/health").openConnection() as HttpURLConnection
+        try {
+            conn.connectTimeout = 2500
+            conn.readTimeout = 2500
+            conn.responseCode == 200
+        } finally {
+            conn.disconnect()
+        }
+    }.getOrDefault(false)
 
     private suspend fun request(method: String, path: String, body: JSONObject? = null): String {
         val token = auth.currentUser?.getIdToken(false)?.await()?.token ?: throw IOException("Not signed in")
+        val url = baseUrl()
         return withContext(Dispatchers.IO) {
-            val conn = URL(BuildConfig.API_URL + path).openConnection() as HttpURLConnection
+            val conn = URL(url + path).openConnection() as HttpURLConnection
             try {
                 conn.requestMethod = method
                 conn.connectTimeout = 15_000
@@ -82,6 +113,12 @@ object Backend {
                     ?.bufferedReader()?.use { it.readText() }.orEmpty()
                 if (code !in 200..299) throw IOException("$method $path failed ($code): ${text.take(200)}")
                 text
+            } catch (e: java.net.SocketException) {
+                base = null // the network changed; look for the backend again next time
+                throw e
+            } catch (e: java.net.SocketTimeoutException) {
+                base = null
+                throw e
             } finally {
                 conn.disconnect()
             }

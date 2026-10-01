@@ -16,6 +16,7 @@ def notify_case(
     kind: str,
     ref_id: int | None = None,
     exclude_user_id: str | None = None,
+    extra: dict[str, str] | None = None,
 ) -> int:
     """Push to every device of the case's members. Call after commit. Never raises.
 
@@ -34,7 +35,7 @@ def notify_case(
     tokens = list(session.exec(stmt).all())
     if not tokens:
         return 0
-    data = {"case_id": str(case_id), "kind": kind, "ref_id": str(ref_id or "")}
+    data = {"case_id": str(case_id), "kind": kind, "ref_id": str(ref_id or ""), **(extra or {})}
     try:
         sent, dead = firebase.send_push(tokens, title, body, data)
         for token in dead:

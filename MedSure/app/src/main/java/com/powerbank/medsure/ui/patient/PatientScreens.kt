@@ -33,6 +33,12 @@ fun dial108(context: android.content.Context) {
     context.startActivity(Intent(Intent.ACTION_DIAL, Uri.parse("tel:108")))
 }
 
+/** Opens the dialler with an Indian mobile number filled in. */
+fun dial(context: android.content.Context, phone: String) {
+    val digits = phone.filter { it.isDigit() }.takeLast(10)
+    if (digits.isNotEmpty()) context.startActivity(Intent(Intent.ACTION_DIAL, Uri.parse("tel:+91$digits")))
+}
+
 // ====================== TODAY ======================
 
 @Composable
@@ -407,7 +413,9 @@ fun HelpScreen(vm: MedSureViewModel) {
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             MsButton(t["call108s"], BtnKind.Danger, Modifier.weight(1f)) { dial108(ctx) }
             val fam = vm.members.firstOrNull()
-            MsButton(if (fam != null) "${t["call"]} ${fam.name}" else t["callFam"], BtnKind.Light, Modifier.weight(1f), enabled = fam != null) {}
+            MsButton(if (fam != null) "${t["call"]} ${fam.name}" else t["callFam"], BtnKind.Light, Modifier.weight(1f), enabled = fam != null) {
+                fam?.let { dial(ctx, it.phone) }
+            }
         }
         Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             filters.forEach { (id, label) -> Chip(label, vm.filter == id) { vm.filter = id } }

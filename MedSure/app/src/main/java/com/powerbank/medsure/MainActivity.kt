@@ -28,6 +28,8 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.powerbank.medsure.state.*
 import com.powerbank.medsure.ui.auth.*
@@ -60,6 +62,7 @@ class MainActivity : ComponentActivity() {
 /** Outer frame: paper column, max 480dp wide and centred (the prototype's responsive shell). */
 @Composable
 fun MedSureApp(vm: MedSureViewModel) {
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { vm.refresh() }
     Box(Modifier.fillMaxSize().background(Ms.Outside), contentAlignment = Alignment.TopCenter) {
         Box(
             Modifier.fillMaxHeight().widthIn(max = 480.dp).fillMaxWidth().background(Ms.Paper)

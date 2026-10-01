@@ -28,9 +28,15 @@ def verify_token(id_token: str) -> dict:
 
 
 def send_push(tokens: list[str], title: str, body: str, data: dict[str, str]) -> tuple[int, list[str]]:
-    """Returns (delivered count, tokens that are no longer registered)."""
+    """Returns (delivered count, tokens that are no longer registered).
+
+    Sent as a high-priority data message so the app draws the notification itself, including when it is
+    in the background. That is what lets it add buttons such as "Call".
+    """
     message = messaging.MulticastMessage(
-        tokens=tokens, notification=messaging.Notification(title=title, body=body), data=data
+        tokens=tokens,
+        data={**data, "title": title, "body": body},
+        android=messaging.AndroidConfig(priority="high"),
     )
     resp = messaging.send_each_for_multicast(message, app=_app())
     dead = [t for t, r in zip(tokens, resp.responses) if isinstance(r.exception, messaging.UnregisteredError)]
