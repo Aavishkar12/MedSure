@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+sqlmodel
+psycopg2-binary
+python-multipart
+pydantic-settings
+firebase-admin
+groq
+pymupdf

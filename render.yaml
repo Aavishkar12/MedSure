@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: medsure-api
+    runtime: python
+    plan: free
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.10
+      - key: AUTH_DEV_BYPASS
+        value: "false"
+      # Secrets: set these in the Render dashboard, never in this file.
+      - key: DATABASE_URL
+        sync: false
+      - key: FIREBASE_CREDENTIALS # paste the whole service-account JSON as the value
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
