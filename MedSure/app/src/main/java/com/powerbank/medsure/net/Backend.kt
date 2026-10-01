@@ -29,8 +29,11 @@ object Backend {
         auth.signOut()
     }
 
+    /** A blank name is not sent, so the backend keeps the one it already has. */
     suspend fun saveProfile(name: String, phone: String, email: String) {
-        request("PATCH", "/me", JSONObject().put("name", name).put("phone", phone).put("email", email))
+        val body = JSONObject().put("phone", phone).put("email", email)
+        if (name.isNotBlank()) body.put("name", name)
+        request("PATCH", "/me", body)
     }
 
     /** Registers this phone for push notifications. Call after sign-in and whenever the token changes. */
@@ -38,10 +41,32 @@ object Backend {
         request("POST", "/devices", JSONObject().put("token", token ?: pushToken()))
     }
 
-    /** Id of the first case this user belongs to, or null if they are not on one yet. */
-    suspend fun firstCaseId(): Int? {
-        val cases = JSONArray(request("GET", "/cases"))
-        return if (cases.length() > 0) cases.getJSONObject(0).getInt("id") else null
+    /** The patient's own case, or for family the newest case they were added to. Null if there is none yet. */
+    suspend fun myCaseId(asPatient: Boolean): Int? {
+        val cases = JSONArray(request("GET", "/cases?as_patient=$asPatient"))
+        return if (cases.length() > 0) cases.getJSONObject(cases.length() - 1).getInt("id") else null
+    }
+
+    class RemoteMember(val name: String, val relation: String, val canApprove: Boolean, val phone: String, val you: Boolean)
+
+    /** Everyone on the case, including people invited who have not signed in yet. */
+    suspend fun members(caseId: Int): List<RemoteMember> {
+        val all = JSONArray(request("GET", "/cases/$caseId/members"))
+        return List(all.length()) {
+            val m = all.getJSONObject(it)
+            RemoteMember(m.optString("name"), m.optString("relation"), m.optBoolean("can_approve"), if (m.isNull("phone")) "" else m.getString("phone"), m.optBoolean("you"))
+        }
+    }
+
+    /** Shared between the phones on a case: taken (dose id -> true), taken_day, med_change. */
+    suspend fun sharedState(caseId: Int): JSONObject = JSONObject(request("GET", "/cases/$caseId/state"))
+
+    suspend fun sendTaken(caseId: Int, taken: Map<String, Boolean>, day: String) {
+        request("PATCH", "/cases/$caseId/state", JSONObject().put("taken", JSONObject(taken)).put("taken_day", day))
+    }
+
+    suspend fun sendMedChange(caseId: Int, status: String) {
+        request("PATCH", "/cases/$caseId/state", JSONObject().put("med_change", status))
     }
 
     suspend fun createCase(patientName: String, relation: String): Int =

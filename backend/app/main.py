@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 
 from .db import init_db
-from .routers import cases, checkins, claims, devices, documents
+from .routers import cases, checkins, claims, devices, documents, state
 
 
 @asynccontextmanager
@@ -17,7 +17,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="MedSure API", version="0.1.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-for r in (devices, cases, documents, claims, checkins):
+for r in (devices, cases, documents, claims, checkins, state):
     app.include_router(r.router)
 
 

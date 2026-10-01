@@ -5,7 +5,7 @@ from sqlmodel import Session, select
 from . import firebase
 from .config import settings
 from .db import get_session
-from .models import Case, CaseMember, Invite, TimelineEvent, User
+from .models import Case, CaseMember, Device, Invite, TimelineEvent, User
 
 
 def current_user(
@@ -63,6 +63,31 @@ def claim_invites(session: Session, user: User) -> None:
             )
         user.name = user.name or invite.name
         session.delete(invite)
+
+
+def adopt_phone(session: Session, user: User) -> None:
+    """A phone number identifies a person. Signing in again creates a new account, so whatever
+    older accounts with this number belonged to moves to the current one. Caller commits.
+
+    Without this, an invite sent to that number lands on a stale account whose phone never hears about it.
+    """
+    if not user.phone:
+        return
+    for old in session.exec(select(User).where(User.phone == user.phone, User.id != user.id)).all():
+        for m in session.exec(select(CaseMember).where(CaseMember.user_id == old.id)).all():
+            mine = session.get(CaseMember, (m.case_id, user.id))
+            if mine:
+                mine.can_approve = mine.can_approve or m.can_approve
+                session.add(mine)
+            else:
+                session.add(CaseMember(case_id=m.case_id, user_id=user.id, relation=m.relation, can_approve=m.can_approve))
+            session.delete(m)
+        for device in session.exec(select(Device).where(Device.user_id == old.id)).all():
+            device.user_id = user.id  # a phone still registered under the old account keeps getting alerts
+            session.add(device)
+        user.name = user.name or old.name
+        old.phone = None
+        session.add(old)
 
 
 def require_member(session: Session, case_id: int, user: User) -> Case:

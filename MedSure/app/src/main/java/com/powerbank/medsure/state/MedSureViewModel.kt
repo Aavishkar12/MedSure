@@ -23,6 +23,8 @@ import com.powerbank.medsure.push.PushBus
 import com.powerbank.medsure.ui.theme.Ms
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.json.JSONArray
 import org.json.JSONObject
 import java.time.LocalDate
@@ -67,6 +69,12 @@ const val CALL_COUNTDOWN_SECONDS = 10
 /** true: a red result also starts the 10 s countdown call. false: only the hidden 'Get help now' tap calls. */
 const val AUTO_CALL_ON_RED = true
 const val NEXT_CALL_COUNTDOWN_SECONDS = 3
+
+/** Relations the app has a label for; anything else shows as "Other". */
+private val KNOWN_RELATIONS = setOf("son", "daughter", "spouse", "other")
+
+/** Bump when the saved-state format changes; older saved state is then dropped. */
+private const val STATE_VERSION = 2
 
 data class Dose(
     val id: String, val name: String, val time: String, val what: String, val why: String, val taken: Boolean,
@@ -218,39 +226,38 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
         }
 
         // Family lands in the app now. A patient's case is created when onboarding finishes.
-        val name = me
-        sync("Sign-in") {
-            Backend.signIn()
-            Backend.saveProfile(name, phone, email) // also joins any case this phone or email was invited to
-            caseId = Backend.firstCaseId()
-            Backend.registerDevice()
-        }
+        sessionStale = true
+        send("Sign-in")
     }
 
-    /** Sends what the patient entered during onboarding: their name, their case and the helpers they added. */
+    /** Onboarding finished: show the helpers in the family circle and send everything to the backend. */
     private fun saveOnboarding() {
-        val name = onbFullName.trim().ifEmpty { me }
-        val helpers = onbFamilyMembers.toList()
-        helpers.forEach { h ->
-            if (members.none { it.name == h.name && it.phone == h.phone }) {
-                members.add(Member(h.name, "other", if (h.canApprove) "approve" else "view", false, normalizePhone(h.phone)))
+        onbFamilyMembers.forEach { h ->
+            val number = normalizePhone(h.phone)
+            if (members.none { it.phone == number }) {
+                members.add(Member(h.name, "other", if (h.canApprove) "approve" else "view", false, number))
             }
         }
-        sync("Onboarding") {
-            Backend.signIn()
-            Backend.saveProfile(name, phone, email)
-            val id = caseId ?: Backend.firstCaseId() ?: Backend.createCase(name, "self")
-            caseId = id
-            helpers.forEach { Backend.addMember(id, it.name, "family", it.canApprove, it.phone, "") }
-            Backend.registerDevice()
-        }
+        sessionStale = true
+        send("Onboarding")
     }
 
+    /** Logging out leaves a clean slate for whoever signs in next on this phone. */
     fun logout() {
         cancelCall(); callPhase = CallPhase.Idle
         stage = Stage.Welcome; overlay = null; otpP = ""; otpE = ""; sheet = null
         ptab = PTab.Today; ftab = FTab.Home; onboardingStep = 1
-        caseId = null; lastCheckinId = null
+        phone = ""; email = ""
+        members.clear()
+        onbFullName = ""; onbAge = ""; onbGender = null; onbBloodGroup = null
+        onbInteractedName = false; onbInteractedAge = false
+        onbReports.clear(); onbBills.clear(); onbInsCompany = ""; onbInsPolicy = ""; onbInsDoc = null
+        onbFamilyMembers.clear()
+        step = 0; ans.clear(); listening = false; note = ""; noteSaved = ""
+        taken.clear(); taken.putAll(mapOf("d1" to true, "d2" to true, "d3" to false, "d4" to false))
+        medChange = "pending"; sent.clear(); k4 = false; k5 = false; approved = false
+        caseId = null; lastCheckinId = null; sentNote = ""
+        sessionStale = true; pendingCheckin = false; stateDirty = false
         sync("Sign-out") { Backend.signOut() }
     }
 
@@ -261,34 +268,113 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
     /** Today's check-in on the backend, so a note added afterwards can be attached to it. */
     private var lastCheckinId by mutableStateOf<Int?>(null)
 
+    // What still has to reach the backend. These are saved with the rest of the state, so anything that
+    // failed to send (no network, server down) is retried until it gets through, even after a restart.
+    private var sessionStale by mutableStateOf(true)      // profile, case and family circle not confirmed yet
+    private var pendingCheckin by mutableStateOf(false)   // today's check-in not sent yet
+    private var stateDirty by mutableStateOf(false)       // tablets taken / medicine change not sent yet
+    private var sentNote by mutableStateOf("")
+    private val syncLock = Mutex()
+
     init {
         viewModelScope.launch { PushBus.events.collect { refresh() } }
     }
 
-    /** Pulls what other family members did. Called when the app comes to the front and when a push arrives. */
-    fun refresh() {
-        if (stage != Stage.App || !Backend.signedIn) return
-        sync("Refresh") {
-            // Family joins a case when the patient invites them, which can happen after they signed in.
-            val id = caseId ?: Backend.firstCaseId()?.also { caseId = it } ?: return@sync
-            // Family sees the patient's latest check-in from today: answers, result and note.
-            if (!isPatient) {
-                val latest = Backend.latestCheckin(id)
-                if (latest != null && latest.isToday) {
-                    if (ans.toList() != latest.levels) { ans.clear(); ans.addAll(latest.levels) }
-                    step = 3
-                    noteSaved = latest.note
-                } else {
-                    ans.clear(); step = 0; noteSaved = ""
+    /** Signs in and makes sure the backend has this person's profile, case and family circle. Returns the case id. */
+    private suspend fun ensureSession(): Int? {
+        Backend.signIn()
+        if (sessionStale) {
+            // Family have no name field at sign-in: the backend keeps the name the patient gave them.
+            val name = if (isPatient) onbFullName.trim().ifEmpty { me } else ""
+            Backend.saveProfile(name, phone, email) // also links this phone number to the cases it was invited to
+            var id = Backend.myCaseId(isPatient)
+            if (id == null && isPatient && stage == Stage.App) id = Backend.createCase(name, "self")
+            caseId = id
+            if (id != null) {
+                members.filter { !it.you && it.phone.isNotBlank() }.forEach {
+                    Backend.addMember(id, it.name, it.rel, it.role == "approve", it.phone, "")
                 }
+            }
+            Backend.registerDevice()
+            sessionStale = false
+        }
+        // Family can be invited to a newer case after they signed in, so they always look again.
+        if (!isPatient || caseId == null) caseId = Backend.myCaseId(isPatient)
+        return caseId
+    }
+
+    /** Sends whatever has not reached the backend yet. */
+    private suspend fun flush(id: Int) {
+        if (isPatient && pendingCheckin && ciDone) {
+            val note = noteSaved
+            lastCheckinId = Backend.checkin(id, ans.toList(), note) // family sees it; they are notified if it needs attention
+            sentNote = note
+            pendingCheckin = false
+        }
+        val checkinId = lastCheckinId
+        if (isPatient && checkinId != null && noteSaved != sentNote) {
+            val note = noteSaved
+            Backend.updateCheckinNote(checkinId, note)
+            sentNote = note
+        }
+        if (stateDirty) {
+            stateDirty = false
+            try {
+                if (isPatient) Backend.sendTaken(id, taken.toMap(), today()) else Backend.sendMedChange(id, medChange)
+            } catch (e: Exception) {
+                stateDirty = true
+                throw e
             }
         }
     }
 
-    /** Runs a backend call without blocking the screens, which keep working if it fails. */
+    /** Brings in what the others on the case did. */
+    private suspend fun pull(id: Int) {
+        // Family circle: the same list on every phone.
+        val circle = Backend.members(id).filter { it.relation != "self" }.map {
+            Member(
+                it.name.ifBlank { "Family" }, if (it.relation in KNOWN_RELATIONS) it.relation else "other",
+                if (it.canApprove) "approve" else "view", it.you, normalizePhone(it.phone),
+            )
+        }
+        if (!sessionStale && circle != members.toList()) { members.clear(); members.addAll(circle) }
+
+        val shared = Backend.sharedState(id)
+        // A medicine change is decided by family; tablets taken are ticked by the patient.
+        shared.optString("med_change").takeIf { it.isNotEmpty() && !stateDirty }?.let { medChange = it }
+        if (isPatient) return
+        val sharedTaken = shared.optJSONObject("taken")
+        if (sharedTaken != null && shared.optString("taken_day") == today()) {
+            sharedTaken.keys().forEach { taken[it] = sharedTaken.getBoolean(it) }
+        }
+        // The patient's latest check-in from today: answers, result and note.
+        val latest = Backend.latestCheckin(id)
+        if (latest != null && latest.isToday) {
+            if (ans.toList() != latest.levels) { ans.clear(); ans.addAll(latest.levels) }
+            step = 3
+            noteSaved = latest.note
+        } else {
+            ans.clear(); step = 0; noteSaved = ""
+        }
+    }
+
+    /** Full sync. Runs when the app comes to the front, when a push arrives, and every few seconds while open. */
+    fun refresh() {
+        if (stage != Stage.App || syncLock.isLocked) return
+        sync("Refresh") {
+            val id = ensureSession() ?: return@sync
+            flush(id)
+            pull(id)
+        }
+    }
+
+    /** Sends local changes now. If it fails they stay marked and the next refresh retries. */
+    private fun send(what: String) = sync(what) { ensureSession()?.let { flush(it) } }
+
+    /** Runs backend work off the screens, one piece at a time. The screens keep working if it fails. */
     private fun sync(what: String, block: suspend () -> Unit) {
         viewModelScope.launch {
-            try { block() } catch (e: Exception) { Log.w("MedSure", "$what failed", e) }
+            try { syncLock.withLock { block() } } catch (e: Exception) { Log.w("MedSure", "$what failed", e) }
         }
     }
 
@@ -326,9 +412,8 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
         members.add(added)
         overlay = if (prevOverlay == Overlay.Settings) Overlay.Settings else null
 
-        val id = caseId ?: return
-        val (invitePhone, inviteEmail) = fPhone to fEmail
-        sync("Invite") { Backend.addMember(id, added.name, added.rel, added.role == "approve", invitePhone, inviteEmail) }
+        sessionStale = true // the family circle changed; it is sent again in full
+        send("Invite")
     }
 
     val me: String get() = if (isPatient) onbFullName.trim().substringBefore(' ').ifEmpty { "Lakshmi" } else (members.firstOrNull { it.you }?.name ?: "Arjun")
@@ -352,7 +437,17 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
     val takenCount get() = taken.values.count { it }
-    fun toggleDose(id: String) { taken[id] = taken[id] != true }
+    fun toggleDose(id: String) {
+        taken[id] = taken[id] != true
+        if (isPatient) { stateDirty = true; send("Tablets") } // family sees today's tablets
+    }
+
+    /** Family approves or holds a dose change; the patient's medicine list follows. */
+    fun changeMed(status: String) {
+        medChange = status
+        stateDirty = true
+        send("Medicine change")
+    }
 
     // ---------- Check-in ----------
     val questions: List<Pair<String, List<Pair<String, Int>>>>
@@ -379,25 +474,21 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
     val medWarn get() = !asking && (ans.getOrNull(2) ?: 0) > 0
     fun answer(lvl: Int) {
         ans.add(lvl); step += 1; listening = false
-        val id = caseId
-        if (ciDone && id != null) {
-            val levels = ans.toList()
-            val sentNote = noteSaved
-            sync("Check-in") {
-                val checkinId = Backend.checkin(id, levels, sentNote) // family sees it; they are notified if it needs attention
-                lastCheckinId = checkinId
-                if (noteSaved != sentNote) Backend.updateCheckinNote(checkinId, noteSaved) // note typed while this was sending
-            }
+        if (ciDone && isPatient) {
+            pendingCheckin = true; lastCheckinId = null; sentNote = ""
+            send("Check-in")
         }
         if (AUTO_CALL_ON_RED && step >= 3 && levelIndex == 2 && isPatient) armCall()      // red -> start the 10 s countdown
     }
-    fun resetCi() { cancelCall(); callPhase = CallPhase.Idle; step = 0; ans.clear(); listening = false; note = ""; noteSaved = ""; lastCheckinId = null }
+    fun resetCi() {
+        cancelCall(); callPhase = CallPhase.Idle
+        step = 0; ans.clear(); listening = false; note = ""; noteSaved = ""
+        lastCheckinId = null; sentNote = ""; pendingCheckin = false
+    }
     fun saveNote() {
         if (note.isBlank()) return
         noteSaved = note.trim(); note = ""
-        val checkinId = lastCheckinId ?: return // not sent yet: the note goes with the check-in itself
-        val text = noteSaved
-        sync("Note") { Backend.updateCheckinNote(checkinId, text) }
+        send("Note") // goes with the check-in, or as an update if that was already sent
     }
 
     // ---------- Automatic red-alert call (from the patient's own phone) ----------
@@ -408,8 +499,11 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
     var askedCallPerm by mutableStateOf(false)
     private var countJob: Job? = null
 
-    /** Family who can approve and have a saved number, in the order they were added. */
-    val callers get() = members.filter { it.role == "approve" && it.phone.isNotBlank() }
+    /**
+     * Family with a saved number. Those who can approve are called first, then view-only members:
+     * in an emergency anyone the patient added should be reachable.
+     */
+    val callers get() = members.filter { !it.you && it.phone.isNotBlank() }.sortedByDescending { it.role == "approve" }
     val callTarget: Member? get() = callers.getOrNull(callIdx)
     val hasNextCaller get() = callIdx + 1 < callers.size
 
@@ -554,7 +648,8 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
     private fun <T> JSONArray.mapObjects(f: (JSONObject) -> T): List<T> = List(length()) { f(getJSONObject(it)) }
 
     private fun snapshot(): JSONObject = JSONObject()
-        .put("day", today())
+        .put("v", STATE_VERSION).put("day", today())
+        .put("sessionStale", sessionStale).put("pendingCheckin", pendingCheckin).put("stateDirty", stateDirty).put("sentNote", sentNote)
         .put("stage", when (stage) {
             Stage.App -> "App"
             Stage.Onboarding, Stage.Processing -> "Onboarding"
@@ -587,6 +682,7 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun restore() {
         val o = JSONObject(prefs.getString("state", null) ?: return)
+        if (o.optInt("v") != STATE_VERSION) return // saved by an older build: start clean
         lang = o.str("lang")
         role = if (o.optString("role") == Role.Family.name) Role.Family else Role.Patient
         loginRole = role
@@ -613,6 +709,7 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
             onbFamilyMembers.addAll(arr.mapObjects { OnboardingFamilyMember(it.getString("name"), it.getString("phone"), it.getBoolean("canApprove")) })
         }
         caseId = o.int("caseId"); askedCallPerm = o.optBoolean("askedCallPerm")
+        sessionStale = o.optBoolean("sessionStale", true); stateDirty = o.optBoolean("stateDirty")
 
         // Tablets taken and the check-in belong to one day; a new day starts fresh.
         if (o.optString("day") == today()) {
@@ -620,6 +717,7 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
             o.optJSONArray("ans")?.let { arr -> ans.clear(); ans.addAll(List(arr.length()) { arr.getInt(it) }) }
             step = o.optInt("step").coerceIn(0, 3).coerceAtMost(ans.size)
             note = o.optString("note"); noteSaved = o.optString("noteSaved"); lastCheckinId = o.int("lastCheckinId")
+            pendingCheckin = o.optBoolean("pendingCheckin"); sentNote = o.optString("sentNote")
         }
         stage = when (o.optString("stage")) {
             "App" -> Stage.App

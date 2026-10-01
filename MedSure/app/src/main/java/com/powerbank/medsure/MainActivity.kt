@@ -67,9 +67,9 @@ class MainActivity : ComponentActivity() {
 fun MedSureApp(vm: MedSureViewModel) {
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { vm.refresh() }
     LifecycleEventEffect(Lifecycle.Event.ON_PAUSE) { vm.save() }
-    // Family view also checks every few seconds while open, in case a push is delayed or missed.
+    // Both views sync every few seconds while open: it retries anything unsent and covers a missed push.
     LaunchedEffect(vm.stage, vm.role) {
-        while (vm.stage == Stage.App && !vm.isPatient) {
+        while (vm.stage == Stage.App) {
             kotlinx.coroutines.delay(8000)
             vm.refresh()
         }

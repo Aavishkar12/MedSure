@@ -116,14 +116,14 @@ fun FamilyMedsScreen(vm: MedSureViewModel) {
                 D(t["changeTxt"], 22, lh = 1.2f)
                 T(t["changeSrc"], 14, 400, Ms.Brown, lh = 1.5f)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    MsButton(t["askDoc"], BtnKind.Light, Modifier.weight(1f)) { vm.medChange = "held" }
-                    MsButton(t["approveChg"], BtnKind.Primary, Modifier.weight(1f)) { vm.medChange = "approved" }
+                    MsButton(t["askDoc"], BtnKind.Light, Modifier.weight(1f)) { vm.changeMed("held") }
+                    MsButton(t["approveChg"], BtnKind.Primary, Modifier.weight(1f)) { vm.changeMed("approved") }
                 }
             }
             "approved" -> T(t["chgApproved"], 15, 600, Ms.GreenFg, Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(Ms.GreenBg).padding(16.dp))
             else -> MsCard(gap = 10.dp) {
                 T(t["chgHeld"], 15, 600)
-                MsButton(t["approveChg"], BtnKind.Primary, height = 44.dp) { vm.medChange = "approved" }
+                MsButton(t["approveChg"], BtnKind.Primary, height = 44.dp) { vm.changeMed("approved") }
             }
         }
         D(t["todayDoses"], 22)
