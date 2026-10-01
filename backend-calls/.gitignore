@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+medsure.db
+firebase-service-account.json
+.pytest_cache/

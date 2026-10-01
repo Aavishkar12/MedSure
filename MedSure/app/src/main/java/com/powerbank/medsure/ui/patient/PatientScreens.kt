@@ -1,9 +1,16 @@
 package com.powerbank.medsure.ui.patient
 
+import android.Manifest
+import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import androidx.core.content.ContextCompat
 import androidx.compose.animation.core.*
+import androidx.compose.runtime.getValue
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.border
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
@@ -19,25 +26,33 @@ import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import com.powerbank.medsure.state.CallPhase
 import com.powerbank.medsure.state.MedSureViewModel
 import com.powerbank.medsure.state.PTab
 import com.powerbank.medsure.ui.components.*
 import com.powerbank.medsure.ui.theme.Ms
 
+/**
+ * Starts a phone call. With the CALL_PHONE permission it dials straight away; without it, it opens the
+ * dialer with the number filled in (one tap). Never throws.
+ */
+fun placeCall(context: Context, number: String) {
+    val granted = ContextCompat.checkSelfPermission(context, Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED
+    val action = if (granted) Intent.ACTION_CALL else Intent.ACTION_DIAL
+    runCatching { context.startActivity(Intent(action, Uri.parse("tel:$number"))) }
+}
+
 fun dial108(context: android.content.Context) {
     context.startActivity(Intent(Intent.ACTION_DIAL, Uri.parse("tel:108")))
 }
 
-/** Opens the dialler with an Indian mobile number filled in. */
-fun dial(context: android.content.Context, phone: String) {
-    val digits = phone.filter { it.isDigit() }.takeLast(10)
-    if (digits.isNotEmpty()) context.startActivity(Intent(Intent.ACTION_DIAL, Uri.parse("tel:+91$digits")))
-}
 
 // ====================== TODAY ======================
 
@@ -373,15 +388,30 @@ fun CheckinScreen(vm: MedSureViewModel) {
             }
         } else {
             val L = vm.level
+            val haptic = LocalHapticFeedback.current
             Column(Modifier.padding(top = 8.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                Column(
-                    Modifier.fillMaxWidth().clip(RoundedCornerShape(26.dp)).background(L.bg).padding(22.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    T(L.caps, 13, 800, L.fg, spacing = 0.08f)
-                    D(L.title, 30, color = L.fg)
-                    T(L.body, 17, 400, L.fg, lh = 1.5f)
-                    if (vm.medWarn) T(t["medWarn"], 16, 700, L.fg)
+                Box {
+                    Column(
+                        Modifier.fillMaxWidth().clip(RoundedCornerShape(26.dp)).background(L.bg).padding(22.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        T(L.caps, 13, 800, L.fg, spacing = 0.08f)
+                        D(L.title, 30, color = L.fg)
+                        T(L.body, 17, 400, L.fg, lh = 1.5f)
+                        if (vm.medWarn) T(t["medWarn"], 16, 700, L.fg)
+                    }
+                    // Hidden "Get help now" button: invisible, no ripple. Tap the red card and the first family number is called at once.
+                    if (vm.levelIndex == 2) {
+                        Box(
+                            Modifier.matchParentSize()
+                                .clip(RoundedCornerShape(26.dp))
+                                .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) {
+                                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)   // a small buzz so you know it fired
+                                    vm.helpNow()
+                                }
+                                .semantics { contentDescription = L.title }
+                        )
+                    }
                 }
                 if (vm.noteSaved.isNotEmpty()) {
                     MsCard(gap = 6.dp) {
@@ -389,6 +419,7 @@ fun CheckinScreen(vm: MedSureViewModel) {
                         T(vm.noteSaved, 16, 400, lh = 1.5f)
                     }
                 }
+                if (vm.levelIndex == 2) AutoCallCard(vm)
                 if (vm.levelIndex == 2) MsButton(t["call108"], BtnKind.Danger, Modifier.fillMaxWidth()) { dial108(ctx) }
                 if (vm.levelIndex > 0) MsButton(t["findHosp"], BtnKind.Primary, Modifier.fillMaxWidth(), icon = LineIcons.MapPin) { vm.ptab = PTab.Help }
                 MsButton(t["again"], BtnKind.Light, Modifier.fillMaxWidth()) { vm.resetCi() }
@@ -413,8 +444,8 @@ fun HelpScreen(vm: MedSureViewModel) {
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             MsButton(t["call108s"], BtnKind.Danger, Modifier.weight(1f)) { dial108(ctx) }
             val fam = vm.members.firstOrNull()
-            MsButton(if (fam != null) "${t["call"]} ${fam.name}" else t["callFam"], BtnKind.Light, Modifier.weight(1f), enabled = fam != null) {
-                fam?.let { dial(ctx, it.phone) }
+            MsButton(if (fam != null) "${t["call"]} ${fam.name}" else t["callFam"], BtnKind.Light, Modifier.weight(1f), enabled = fam != null && fam.phone.isNotBlank()) {
+                fam?.let { placeCall(ctx, it.phone) }
             }
         }
         Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -456,3 +487,66 @@ fun HelpScreen(vm: MedSureViewModel) {
         }
     }
 }
+
+
+// ====================== AUTOMATIC CALL (RED) ======================
+
+private fun fill(text: String, name: String, n: Int = 0) = text.replace("{name}", name).replace("{n}", n.toString())
+
+/** 10-second countdown with Cancel, then the patient's phone calls the first family member who can approve. */
+@Composable
+private fun AutoCallCard(vm: MedSureViewModel) {
+    val t = vm.tx
+    val name = vm.callTarget?.name ?: ""
+    when (vm.callPhase) {
+        CallPhase.Idle -> {}
+
+        CallPhase.NoOne -> MsCard(bg = Ms.FlagBg, border = Ms.FlagBorder, gap = 6.dp) {
+            D(t["acNoOne"], 20)
+            T(t["acNoOneBody"], 15, 400, Ms.Brown, lh = 1.5f)
+        }
+
+        CallPhase.Counting -> {
+            val progress by animateFloatAsState(vm.countdown / CALL_SECONDS_F, tween(1000, easing = LinearEasing), label = "countdown")
+            Column(
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(22.dp)).background(Ms.Ink).padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                    Tick(64.dp, Ms.Marigold) { D("${vm.countdown}", 32, color = Ms.Ink, lh = 1f) }
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        D(fill(t["acTitle"], name, vm.countdown), 22, color = Ms.Paper, lh = 1.15f)
+                        T(fill(t["acBody"], name), 14, 400, Ms.OnDark, lh = 1.45f)
+                    }
+                }
+                Box(Modifier.fillMaxWidth().height(8.dp).clip(RoundedCornerShape(999.dp)).background(Ms.PlusLine)) {
+                    Box(Modifier.fillMaxWidth(progress.coerceIn(0f, 1f)).height(8.dp).clip(RoundedCornerShape(999.dp)).background(Ms.Marigold))
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    MsButton(t["acCancel"], BtnKind.Light, Modifier.weight(1f), height = 58.dp, fontSize = 17) { vm.cancelCall() }
+                    MsButton(t["acNow"], BtnKind.Mari, Modifier.weight(1f), height = 58.dp, fontSize = 17) { vm.callNow() }
+                }
+            }
+        }
+
+        CallPhase.Dialed -> MsCard(gap = 12.dp) {
+            D(fill(t["acCalled"], name), 22)
+            T(fill(t["acCalledBody"], name), 15, 400, Ms.Text3, lh = 1.5f)
+            if (vm.hasNextCaller) {
+                val next = vm.callers[vm.callIdx + 1].name
+                MsButton(fill(t["acNext"], next), BtnKind.Primary, Modifier.fillMaxWidth()) { vm.callNext() }
+            } else {
+                T(t["acNoMore"], 15, 700, Ms.Red, lh = 1.4f)
+            }
+            MsButton(fill(t["acAgain"], name), BtnKind.Light, Modifier.fillMaxWidth(), height = 46.dp) { vm.callAgain() }
+        }
+
+        CallPhase.Cancelled -> MsCard(gap = 10.dp) {
+            D(t["acCancelled"], 22)
+            T(t["acCancelledBody"], 15, 400, Ms.Text3, lh = 1.5f)
+            MsButton(t["acRetry"], BtnKind.Light, Modifier.fillMaxWidth()) { vm.armCall() }
+        }
+    }
+}
+
+private const val CALL_SECONDS_F = 10f

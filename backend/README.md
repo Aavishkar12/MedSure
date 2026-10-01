@@ -1,5 +1,10 @@
 # MedSure backend
 
+> **Two backends live in this repo for now.** This one (`backend/`) is what the Android app talks to:
+> Firebase sign-in, cases, documents, claims, AI features and push notifications.
+> `backend-calls/` is the red-alert escalation service (Twilio phone calls, SMS, its own OTP login).
+> It runs and is tested on its own, but the app does not call it yet. See `backend-calls/README.md`.
+
 FastAPI + Postgres (Neon) + Firebase Auth/FCM + Groq.
 
 ## Run locally

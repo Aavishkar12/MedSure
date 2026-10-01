@@ -11,6 +11,8 @@ import androidx.compose.ui.graphics.Color
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import com.powerbank.medsure.i18n.AllLanguages
 import com.powerbank.medsure.i18n.Tx
 import com.powerbank.medsure.net.Backend
@@ -49,6 +51,15 @@ data class OnboardingFamilyMember(
 )
 
 data class Member(val name: String, val rel: String, val role: String, val you: Boolean, val phone: String = "")
+
+/** Where the automatic red-alert call is. */
+enum class CallPhase { Idle, Counting, Dialed, Cancelled, NoOne }
+
+const val CALL_COUNTDOWN_SECONDS = 10
+
+/** true: a red result also starts the 10 s countdown call. false: only the hidden 'Get help now' tap calls. */
+const val AUTO_CALL_ON_RED = true
+const val NEXT_CALL_COUNTDOWN_SECONDS = 3
 
 data class Dose(
     val id: String, val name: String, val time: String, val what: String, val why: String, val taken: Boolean,
@@ -187,7 +198,7 @@ class MedSureViewModel : ViewModel() {
     fun verify() {
         if (!canVerify) return
         if (loginRole == Role.Family) {
-            if (members.isEmpty()) members.add(Member("Arjun", "son", "approve", true))
+            if (members.isEmpty()) members.add(Member("Arjun", "son", "approve", true, phone = normalizePhone(phone)))
             else members.indices.forEach { i -> members[i] = members[i].copy(you = i == 0) }
             role = Role.Family
             overlay = null; ptab = PTab.Today; ftab = FTab.Home
@@ -215,7 +226,7 @@ class MedSureViewModel : ViewModel() {
         val helpers = onbFamilyMembers.toList()
         helpers.forEach { h ->
             if (members.none { it.name == h.name && it.phone == h.phone }) {
-                members.add(Member(h.name, "other", if (h.canApprove) "approve" else "view", false, h.phone))
+                members.add(Member(h.name, "other", if (h.canApprove) "approve" else "view", false, normalizePhone(h.phone)))
             }
         }
         sync("Onboarding") {
@@ -229,6 +240,7 @@ class MedSureViewModel : ViewModel() {
     }
 
     fun logout() {
+        cancelCall(); callPhase = CallPhase.Idle
         stage = Stage.Welcome; overlay = null; otpP = ""; otpE = ""; sheet = null
         ptab = PTab.Today; ftab = FTab.Home; onboardingStep = 1
         caseId = null
@@ -274,11 +286,25 @@ class MedSureViewModel : ViewModel() {
         overlay = Overlay.Add
     }
 
-    val canAdd get() = fName.isNotBlank() && !(isPatient && members.isNotEmpty())
+    /** Exactly 10 digits, typed without +91. A pasted +91 / 91 / leading 0 is stripped. */
+    fun cleanPhone10(raw: String): String {
+        var d = raw.filter { it.isDigit() }
+        if (d.length >= 12 && d.startsWith("91")) d = d.drop(2)
+        else if (d.length == 11 && d.startsWith("0")) d = d.drop(1)
+        return d.take(10)
+    }
+    fun onFPhone(v: String) { fPhone = cleanPhone10(v) }
+
+    /** A valid Indian mobile number: 10 digits starting with 6, 7, 8 or 9. */
+    val phoneOk get() = fPhone.length == 10 && fPhone[0] in '6'..'9'
+    val phoneBadStart get() = fPhone.isNotEmpty() && fPhone[0] !in '6'..'9'
+
+    // The email is free text on purpose: it is never checked here.
+    val canAdd get() = fName.isNotBlank() && phoneOk && !(isPatient && members.isNotEmpty())
 
     fun submitAdd() {
         if (!canAdd) return
-        val added = Member(fName.trim(), fRel, if (isPatient) "approve" else fRole, false, fPhone)
+        val added = Member(fName.trim(), fRel, if (isPatient) "approve" else fRole, false, phone = normalizePhone(fPhone))
         members.add(added)
         overlay = if (prevOverlay == Overlay.Settings) Overlay.Settings else null
 
@@ -340,9 +366,73 @@ class MedSureViewModel : ViewModel() {
             val levels = ans.toList()
             sync("Check-in") { Backend.checkin(id, levels, noteSaved) } // family is notified when it needs attention
         }
+        if (AUTO_CALL_ON_RED && step >= 3 && levelIndex == 2 && isPatient) armCall()      // red -> start the 10 s countdown
     }
-    fun resetCi() { step = 0; ans.clear(); listening = false; note = ""; noteSaved = "" }
+    fun resetCi() { cancelCall(); callPhase = CallPhase.Idle; step = 0; ans.clear(); listening = false; note = ""; noteSaved = "" }
     fun saveNote() { if (note.isNotBlank()) { noteSaved = note.trim(); note = "" } }
+
+    // ---------- Automatic red-alert call (from the patient's own phone) ----------
+    var callPhase by mutableStateOf(CallPhase.Idle)
+    var countdown by mutableIntStateOf(CALL_COUNTDOWN_SECONDS)
+    var callIdx by mutableIntStateOf(0)
+    var dialRequest by mutableStateOf<String?>(null)     // MainActivity places the call when this is set
+    var askedCallPerm by mutableStateOf(false)
+    private var countJob: Job? = null
+
+    /** Family who can approve and have a saved number, in the order they were added. */
+    val callers get() = members.filter { it.role == "approve" && it.phone.isNotBlank() }
+    val callTarget: Member? get() = callers.getOrNull(callIdx)
+    val hasNextCaller get() = callIdx + 1 < callers.size
+
+    fun armCall() { callIdx = 0; startCountdown(CALL_COUNTDOWN_SECONDS) }
+
+    private fun startCountdown(seconds: Int) {
+        countJob?.cancel()
+        if (callTarget == null) { callPhase = CallPhase.NoOne; return }
+        callPhase = CallPhase.Counting
+        countdown = seconds
+        countJob = viewModelScope.launch {
+            while (countdown > 0) { delay(1000); countdown -= 1 }
+            dial()
+        }
+    }
+
+    private fun dial() {
+        val target = callTarget ?: return
+        callPhase = CallPhase.Dialed
+        dialRequest = target.phone
+    }
+
+    fun callNow() { countJob?.cancel(); dial() }
+
+    private var lastHelpAt = 0L
+
+    /**
+     * The hidden "Get help now" tap on the red result: calls the first family number at once, no countdown.
+     * Taps within 3 seconds of the last one are ignored so a double tap can't dial twice.
+     */
+    fun helpNow(nowMs: Long = System.currentTimeMillis()) {
+        if (nowMs - lastHelpAt < 3000) return
+        lastHelpAt = nowMs
+        countJob?.cancel()
+        callIdx = 0
+        if (callTarget == null) { callPhase = CallPhase.NoOne; return }
+        dial()
+    }
+    fun cancelCall() { countJob?.cancel(); if (callPhase == CallPhase.Counting) callPhase = CallPhase.Cancelled }
+    fun callAgain() { dial() }
+    fun callNext() { if (hasNextCaller) { callIdx += 1; startCountdown(NEXT_CALL_COUNTDOWN_SECONDS) } }
+
+    /** +91 for 10-digit Indian numbers; keeps an explicit country code otherwise. */
+    fun normalizePhone(raw: String): String {
+        val d = digits(raw)
+        return when {
+            d.length == 10 -> "+91$d"
+            d.length == 12 && d.startsWith("91") -> "+$d"
+            d.length > 10 -> "+$d"
+            else -> d
+        }
+    }
 
     // ---------- Help ----------
     val places: List<Place>

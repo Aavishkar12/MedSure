@@ -172,7 +172,21 @@ fun AddMemberScreen(vm: MedSureViewModel) {
                 }
             }
         }
-        Field(t["mobile"], vm.fPhone, { vm.fPhone = it }, "+91 98765 43210", keyboard = KeyboardType.Phone)
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            T(t["mobile"], 14, 700, Ms.Text3)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                val shape = RoundedCornerShape(14.dp)
+                Box(
+                    Modifier.height(54.dp).clip(shape).background(Ms.Blister).border(1.5.dp, Ms.Line2, shape).padding(horizontal = 14.dp),
+                    contentAlignment = Alignment.Center,
+                ) { T("+91", 17, 700) }
+                Field(null, vm.fPhone, vm::onFPhone, "9876543210", Modifier.weight(1f), KeyboardType.Phone)
+            }
+            when {
+                vm.phoneBadStart -> T(t["phoneErr"], 13, 700, Ms.Red, lh = 1.4f)
+                vm.fPhone.isNotEmpty() && !vm.phoneOk -> T("${vm.fPhone.length}/10", 13, 600, Ms.Muted)
+            }
+        }
         Field(t["email"], vm.fEmail, { vm.fEmail = it }, "name@example.com", keyboard = KeyboardType.Email)
         if (!p) {
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {

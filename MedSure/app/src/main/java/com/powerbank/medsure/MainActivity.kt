@@ -4,8 +4,11 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
-import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.ui.platform.LocalContext
+import androidx.core.content.ContextCompat
+import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -103,6 +106,25 @@ fun MedSureApp(vm: MedSureViewModel) {
 private fun AppScaffold(vm: MedSureViewModel) {
     val t = vm.tx
     val ov = vm.overlay
+    val ctx = LocalContext.current
+
+    // Ask for the phone-call permission once, as soon as the patient is signed in (never in the middle of an alert).
+    val askCall = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
+    LaunchedEffect(vm.role) {
+        val granted = ContextCompat.checkSelfPermission(ctx, Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED
+        if (vm.isPatient && !granted && !vm.askedCallPerm) {
+            vm.askedCallPerm = true
+            askCall.launch(Manifest.permission.CALL_PHONE)
+        }
+    }
+
+    // The countdown lives in the ViewModel; this places the call whichever tab the patient is on.
+    LaunchedEffect(vm.dialRequest) {
+        vm.dialRequest?.let { number ->
+            placeCall(ctx, number)
+            vm.dialRequest = null
+        }
+    }
     Column(Modifier.fillMaxSize()) {
         // Top bar
         Row(
