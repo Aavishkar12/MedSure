@@ -35,7 +35,8 @@ def send_push(tokens: list[str], title: str, body: str, data: dict[str, str]) ->
     """
     message = messaging.MulticastMessage(
         tokens=tokens,
-        data={**data, "title": title, "body": body},
+        # No title/body makes it a silent update: the app refreshes and shows nothing.
+        data={**data, **({"title": title, "body": body} if body else {})},
         android=messaging.AndroidConfig(priority="high"),
     )
     resp = messaging.send_each_for_multicast(message, app=_app())

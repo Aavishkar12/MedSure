@@ -66,6 +66,14 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun MedSureApp(vm: MedSureViewModel) {
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { vm.refresh() }
+    LifecycleEventEffect(Lifecycle.Event.ON_PAUSE) { vm.save() }
+    // Family view also checks every few seconds while open, in case a push is delayed or missed.
+    LaunchedEffect(vm.stage, vm.role) {
+        while (vm.stage == Stage.App && !vm.isPatient) {
+            kotlinx.coroutines.delay(8000)
+            vm.refresh()
+        }
+    }
     Box(Modifier.fillMaxSize().background(Ms.Outside), contentAlignment = Alignment.TopCenter) {
         Box(
             Modifier.fillMaxHeight().widthIn(max = 480.dp).fillMaxWidth().background(Ms.Paper)

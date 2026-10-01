@@ -56,17 +56,34 @@ object Backend {
     }
 
     /** level: 0 on track, 1 keep watch, 2 needs help now. Family is notified when it is above 0. */
-    suspend fun checkin(caseId: Int, levels: List<Int>, note: String) {
+    suspend fun checkin(caseId: Int, levels: List<Int>, note: String): Int {
         val answers = JSONObject().put("level", levels.maxOrNull() ?: 0).put("levels", JSONArray(levels)).put("note", note)
-        request("POST", "/cases/$caseId/checkins", JSONObject().put("answers", answers))
+        return JSONObject(request("POST", "/cases/$caseId/checkins", JSONObject().put("answers", answers))).getInt("id")
     }
 
-    /** Answer levels of the most recent check-in on this case, or null if there is none yet. */
-    suspend fun latestCheckinLevels(caseId: Int): List<Int>? {
+    /** Attaches or changes the note on a check-in that was already sent. */
+    suspend fun updateCheckinNote(checkinId: Int, note: String) {
+        request("PATCH", "/checkins/$checkinId", JSONObject().put("note", note))
+    }
+
+    /** A check-in as stored on the backend. */
+    class RemoteCheckin(val id: Int, val levels: List<Int>, val note: String, val createdAt: String) {
+        /** True when it was made today, in this phone's time zone. The server stores UTC. */
+        val isToday: Boolean
+            get() = runCatching {
+                val utc = java.time.LocalDateTime.parse(createdAt.removeSuffix("Z").substringBefore('+'))
+                utc.atOffset(java.time.ZoneOffset.UTC).atZoneSameInstant(java.time.ZoneId.systemDefault()).toLocalDate() == java.time.LocalDate.now()
+            }.getOrDefault(true)
+    }
+
+    /** The most recent check-in on this case, or null if there is none yet. */
+    suspend fun latestCheckin(caseId: Int): RemoteCheckin? {
         val all = JSONArray(request("GET", "/cases/$caseId/checkins"))
         if (all.length() == 0) return null
-        val levels = all.getJSONObject(all.length() - 1).getJSONObject("answers").optJSONArray("levels") ?: return null
-        return List(levels.length()) { levels.getInt(it) }
+        val last = all.getJSONObject(all.length() - 1)
+        val answers = last.getJSONObject("answers")
+        val levels = answers.optJSONArray("levels") ?: return null
+        return RemoteCheckin(last.getInt("id"), List(levels.length()) { levels.getInt(it) }, answers.optString("note"), last.getString("created_at"))
     }
 
     private suspend fun pushToken(): String = FirebaseMessaging.getInstance().token.await()

@@ -1,5 +1,7 @@
 package com.powerbank.medsure.state
 
+import android.app.Application
+import android.content.Context
 import android.net.Uri
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -9,7 +11,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.Color
 import android.util.Log
-import androidx.lifecycle.ViewModel
+import androidx.compose.runtime.snapshotFlow
+import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -18,7 +21,11 @@ import com.powerbank.medsure.i18n.Tx
 import com.powerbank.medsure.net.Backend
 import com.powerbank.medsure.push.PushBus
 import com.powerbank.medsure.ui.theme.Ms
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import org.json.JSONArray
+import org.json.JSONObject
+import java.time.LocalDate
 
 enum class Stage { Lang, Welcome, Details, Otp, Onboarding, Processing, App }
 enum class Role { Patient, Family }
@@ -85,7 +92,7 @@ data class CheckItem(
 data class Approval(val title: String, val sub: String, val open: () -> Unit)
 
 /** All app state. Mirrors the web prototype one-to-one so the screens behave the same. */
-class MedSureViewModel : ViewModel() {
+class MedSureViewModel(app: Application) : AndroidViewModel(app) {
     // Auth
     var stage by mutableStateOf(Stage.Lang)
     var lang by mutableStateOf<String?>(null)
@@ -243,13 +250,16 @@ class MedSureViewModel : ViewModel() {
         cancelCall(); callPhase = CallPhase.Idle
         stage = Stage.Welcome; overlay = null; otpP = ""; otpE = ""; sheet = null
         ptab = PTab.Today; ftab = FTab.Home; onboardingStep = 1
-        caseId = null
+        caseId = null; lastCheckinId = null
         sync("Sign-out") { Backend.signOut() }
     }
 
     // ---------- Backend ----------
     /** The case this user is on, once the backend has confirmed it. */
     var caseId by mutableStateOf<Int?>(null)
+
+    /** Today's check-in on the backend, so a note added afterwards can be attached to it. */
+    private var lastCheckinId by mutableStateOf<Int?>(null)
 
     init {
         viewModelScope.launch { PushBus.events.collect { refresh() } }
@@ -261,8 +271,16 @@ class MedSureViewModel : ViewModel() {
         sync("Refresh") {
             // Family joins a case when the patient invites them, which can happen after they signed in.
             val id = caseId ?: Backend.firstCaseId()?.also { caseId = it } ?: return@sync
-            if (!isPatient) Backend.latestCheckinLevels(id)?.let { levels ->
-                ans.clear(); ans.addAll(levels); step = 3
+            // Family sees the patient's latest check-in from today: answers, result and note.
+            if (!isPatient) {
+                val latest = Backend.latestCheckin(id)
+                if (latest != null && latest.isToday) {
+                    if (ans.toList() != latest.levels) { ans.clear(); ans.addAll(latest.levels) }
+                    step = 3
+                    noteSaved = latest.note
+                } else {
+                    ans.clear(); step = 0; noteSaved = ""
+                }
             }
         }
     }
@@ -364,12 +382,23 @@ class MedSureViewModel : ViewModel() {
         val id = caseId
         if (ciDone && id != null) {
             val levels = ans.toList()
-            sync("Check-in") { Backend.checkin(id, levels, noteSaved) } // family is notified when it needs attention
+            val sentNote = noteSaved
+            sync("Check-in") {
+                val checkinId = Backend.checkin(id, levels, sentNote) // family sees it; they are notified if it needs attention
+                lastCheckinId = checkinId
+                if (noteSaved != sentNote) Backend.updateCheckinNote(checkinId, noteSaved) // note typed while this was sending
+            }
         }
         if (AUTO_CALL_ON_RED && step >= 3 && levelIndex == 2 && isPatient) armCall()      // red -> start the 10 s countdown
     }
-    fun resetCi() { cancelCall(); callPhase = CallPhase.Idle; step = 0; ans.clear(); listening = false; note = ""; noteSaved = "" }
-    fun saveNote() { if (note.isNotBlank()) { noteSaved = note.trim(); note = "" } }
+    fun resetCi() { cancelCall(); callPhase = CallPhase.Idle; step = 0; ans.clear(); listening = false; note = ""; noteSaved = ""; lastCheckinId = null }
+    fun saveNote() {
+        if (note.isBlank()) return
+        noteSaved = note.trim(); note = ""
+        val checkinId = lastCheckinId ?: return // not sent yet: the note goes with the check-in itself
+        val text = noteSaved
+        sync("Note") { Backend.updateCheckinNote(checkinId, text) }
+    }
 
     // ---------- Automatic red-alert call (from the patient's own phone) ----------
     var callPhase by mutableStateOf(CallPhase.Idle)
@@ -510,4 +539,109 @@ class MedSureViewModel : ViewModel() {
             levelIndex == 1 -> tx["fh2"]
             else -> tx["fh3"]
         }
+
+    // ---------- Persistence ----------
+    // Everything the screens need is written to the phone, so closing or restarting the app loses nothing.
+    private val prefs = app.getSharedPreferences("medsure_state", Context.MODE_PRIVATE)
+
+    private fun today() = LocalDate.now().toString()
+    private fun JSONObject.str(key: String): String? = if (isNull(key)) null else getString(key)
+    private fun JSONObject.int(key: String): Int? = if (isNull(key)) null else getInt(key)
+
+    private fun docJson(d: UploadedDoc) =
+        JSONObject().put("uri", d.uri.toString()).put("name", d.name).put("size", d.sizeBytes).put("mime", d.mimeType)
+    private fun docOf(o: JSONObject) = UploadedDoc(Uri.parse(o.getString("uri")), o.getString("name"), o.getLong("size"), o.getString("mime"))
+    private fun <T> JSONArray.mapObjects(f: (JSONObject) -> T): List<T> = List(length()) { f(getJSONObject(it)) }
+
+    private fun snapshot(): JSONObject = JSONObject()
+        .put("day", today())
+        .put("stage", when (stage) {
+            Stage.App -> "App"
+            Stage.Onboarding, Stage.Processing -> "Onboarding"
+            Stage.Lang -> "Lang"
+            else -> "Welcome"
+        })
+        .put("lang", lang).put("role", role.name).put("phone", phone).put("email", email)
+        .put("ptab", ptab.name).put("ftab", ftab.name)
+        .put("members", JSONArray(members.map {
+            JSONObject().put("name", it.name).put("rel", it.rel).put("role", it.role).put("you", it.you).put("phone", it.phone)
+        }))
+        .put("taken", JSONObject(taken.toMap())).put("step", step).put("ans", JSONArray(ans.toList()))
+        .put("note", note).put("noteSaved", noteSaved).put("lastCheckinId", lastCheckinId)
+        .put("care", care).put("filter", filter).put("chosen", chosen).put("share", share)
+        .put("sent", JSONObject(sent.toMap())).put("k4", k4).put("k5", k5).put("approved", approved)
+        .put("medChange", medChange).put("plan", plan).put("plus", plus)
+        .put("onboardingStep", onboardingStep).put("onbFullName", onbFullName).put("onbAge", onbAge)
+        .put("onbGender", onbGender).put("onbBloodGroup", onbBloodGroup)
+        .put("onbReports", JSONArray(onbReports.map(::docJson))).put("onbBills", JSONArray(onbBills.map(::docJson)))
+        .put("onbInsCompany", onbInsCompany).put("onbInsPolicy", onbInsPolicy).put("onbInsDoc", onbInsDoc?.let(::docJson))
+        .put("onbFamilyMembers", JSONArray(onbFamilyMembers.map {
+            JSONObject().put("name", it.name).put("phone", it.phone).put("canApprove", it.canApprove)
+        }))
+        .put("caseId", caseId).put("askedCallPerm", askedCallPerm)
+
+    /** Writes the current state to the phone. Also runs by itself shortly after anything changes. */
+    fun save() {
+        prefs.edit().putString("state", snapshot().toString()).apply()
+    }
+
+    private fun restore() {
+        val o = JSONObject(prefs.getString("state", null) ?: return)
+        lang = o.str("lang")
+        role = if (o.optString("role") == Role.Family.name) Role.Family else Role.Patient
+        loginRole = role
+        phone = o.optString("phone"); email = o.optString("email")
+        ptab = PTab.entries.firstOrNull { it.name == o.optString("ptab") } ?: PTab.Today
+        ftab = FTab.entries.firstOrNull { it.name == o.optString("ftab") } ?: FTab.Home
+        o.optJSONArray("members")?.let { arr ->
+            members.clear()
+            members.addAll(arr.mapObjects { Member(it.getString("name"), it.getString("rel"), it.getString("role"), it.getBoolean("you"), it.optString("phone")) })
+        }
+        care = o.optString("care", care); filter = o.optString("filter", filter); chosen = o.str("chosen"); share = o.optBoolean("share", share)
+        o.optJSONObject("sent")?.let { m -> sent.clear(); m.keys().forEach { sent[it] = m.getBoolean(it) } }
+        k4 = o.optBoolean("k4"); k5 = o.optBoolean("k5"); approved = o.optBoolean("approved")
+        medChange = o.optString("medChange", medChange); plan = o.optString("plan", plan); plus = o.optBoolean("plus")
+        onboardingStep = o.optInt("onboardingStep", 1).coerceIn(1, 4)
+        onbFullName = o.optString("onbFullName"); onbAge = o.optString("onbAge")
+        onbGender = o.str("onbGender"); onbBloodGroup = o.str("onbBloodGroup")
+        o.optJSONArray("onbReports")?.let { onbReports.clear(); onbReports.addAll(it.mapObjects(::docOf)) }
+        o.optJSONArray("onbBills")?.let { onbBills.clear(); onbBills.addAll(it.mapObjects(::docOf)) }
+        onbInsCompany = o.optString("onbInsCompany"); onbInsPolicy = o.optString("onbInsPolicy")
+        onbInsDoc = o.optJSONObject("onbInsDoc")?.let(::docOf)
+        o.optJSONArray("onbFamilyMembers")?.let { arr ->
+            onbFamilyMembers.clear()
+            onbFamilyMembers.addAll(arr.mapObjects { OnboardingFamilyMember(it.getString("name"), it.getString("phone"), it.getBoolean("canApprove")) })
+        }
+        caseId = o.int("caseId"); askedCallPerm = o.optBoolean("askedCallPerm")
+
+        // Tablets taken and the check-in belong to one day; a new day starts fresh.
+        if (o.optString("day") == today()) {
+            o.optJSONObject("taken")?.let { m -> m.keys().forEach { taken[it] = m.getBoolean(it) } }
+            o.optJSONArray("ans")?.let { arr -> ans.clear(); ans.addAll(List(arr.length()) { arr.getInt(it) }) }
+            step = o.optInt("step").coerceIn(0, 3).coerceAtMost(ans.size)
+            note = o.optString("note"); noteSaved = o.optString("noteSaved"); lastCheckinId = o.int("lastCheckinId")
+        }
+        stage = when (o.optString("stage")) {
+            "App" -> Stage.App
+            "Onboarding" -> Stage.Onboarding
+            "Lang" -> Stage.Lang
+            else -> if (lang != null) Stage.Welcome else Stage.Lang
+        }
+    }
+
+    // Keep this last: every property above must exist before state is restored into it.
+    init {
+        try {
+            restore()
+        } catch (e: Exception) {
+            Log.w("MedSure", "Saved state unreadable, starting fresh", e)
+            prefs.edit().remove("state").apply()
+        }
+        viewModelScope.launch {
+            snapshotFlow { snapshot().toString() }.collectLatest { json ->
+                delay(400) // wait for a burst of changes to settle
+                prefs.edit().putString("state", json).apply()
+            }
+        }
+    }
 }
