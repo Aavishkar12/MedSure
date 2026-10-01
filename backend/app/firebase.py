@@ -23,7 +23,8 @@ def enabled() -> bool:
 
 
 def verify_token(id_token: str) -> dict:
-    return auth.verify_id_token(id_token, app=_app())
+    # Tolerate a server clock that is slightly off, or fresh tokens are rejected as "used too early".
+    return auth.verify_id_token(id_token, app=_app(), clock_skew_seconds=60)
 
 
 def send_push(tokens: list[str], title: str, body: str, data: dict[str, str]) -> tuple[int, list[str]]:
