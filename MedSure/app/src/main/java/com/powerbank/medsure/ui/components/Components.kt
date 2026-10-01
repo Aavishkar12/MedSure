@@ -36,6 +36,7 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -59,12 +60,16 @@ fun T(
     align: TextAlign? = null,
     spacing: Float = 0f,
     family: FontFamily = Body,
+    maxLines: Int = Int.MAX_VALUE,
+    overflow: TextOverflow = TextOverflow.Clip,
 ) {
     Text(
         text = text,
         modifier = modifier,
         color = color,
         textAlign = align,
+        maxLines = maxLines,
+        overflow = overflow,
         style = TextStyle(
             fontFamily = family,
             fontSize = size.sp,

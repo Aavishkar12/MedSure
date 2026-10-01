@@ -78,16 +78,20 @@ fun MedSureApp(vm: MedSureViewModel) {
                     Stage.Welcome -> WelcomeScreen(vm)
                     Stage.Details -> DetailsScreen(vm)
                     Stage.Otp -> OtpScreen(vm)
+                    Stage.Onboarding -> OnboardingScreen(vm)
+                    Stage.Processing -> ProcessingScreen(vm)
                     Stage.App -> AppScaffold(vm)
                 }
             }
             SheetHost(vm)
         }
     }
-    BackHandler(enabled = vm.sheet != null || vm.overlay != null || vm.stage == Stage.Details || vm.stage == Stage.Otp || vm.stage == Stage.Welcome) {
+    BackHandler(enabled = vm.sheet != null || vm.overlay != null || vm.stage == Stage.Details || vm.stage == Stage.Otp || vm.stage == Stage.Welcome || vm.stage == Stage.Onboarding || vm.stage == Stage.Processing) {
         when {
             vm.sheet != null -> vm.sheet = null
             vm.overlay != null -> vm.closeOverlay()
+            vm.stage == Stage.Processing -> { /* Disabled on processing screen */ }
+            vm.stage == Stage.Onboarding -> vm.prevOnboardingStep()
             vm.stage == Stage.Otp -> vm.stage = Stage.Details
             vm.stage == Stage.Details -> vm.stage = Stage.Welcome
             vm.stage == Stage.Welcome -> vm.stage = Stage.Lang

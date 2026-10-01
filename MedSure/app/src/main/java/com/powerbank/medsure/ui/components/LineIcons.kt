@@ -111,4 +111,11 @@ object LineIcons {
     }
     val LogOut by lazy { icon("logout", "M9 21 H5 A2 2 0 0 1 3 19 V5 A2 2 0 0 1 5 3 H9", "M16 17 L21 12 L16 7", "M21 12 L9 12") }
     val Pen by lazy { icon("pen", "M12 20 H21", "M16.5 3.5 A2.12 2.12 0 0 1 19.5 6.5 L7 19 L3 20 L4 16 Z") }
+    val Upload by lazy {
+        icon("upload", "M21 15 V19 A2 2 0 0 1 19 21 H5 A2 2 0 0 1 3 19 V15", "M17 8 L12 3 L7 8", "M12 3 V15")
+    }
+    val Paperclip by lazy {
+        icon("paperclip", "M21.44 11.05 L12.25 20.24 A6 6 0 0 1 3.76 11.75 L12.95 2.56 A4 4 0 0 1 18.61 8.22 L9.41 17.41 A2 2 0 0 1 6.58 14.58 L15.07 6.1")
+    }
 }
+

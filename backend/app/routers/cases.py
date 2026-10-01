@@ -96,6 +96,9 @@ def add_member(
                 CaseMember(case_id=case_id, user_id=existing.id, relation=body.relation, can_approve=body.can_approve)
             )
     else:
+        same = ([Invite.phone == phone] if phone else []) + ([Invite.email == email] if email else [])
+        if same and session.exec(select(Invite).where(Invite.case_id == case_id, or_(*same))).first():
+            return list_members(case_id, user, session)  # already invited
         session.add(
             Invite(
                 case_id=case_id, name=body.name.strip(), relation=body.relation, can_approve=body.can_approve,

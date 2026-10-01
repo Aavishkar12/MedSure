@@ -1,5 +1,6 @@
 package com.powerbank.medsure.state
 
+import android.net.Uri
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
@@ -17,12 +18,35 @@ import com.powerbank.medsure.push.PushBus
 import com.powerbank.medsure.ui.theme.Ms
 import kotlinx.coroutines.launch
 
-enum class Stage { Lang, Welcome, Details, Otp, App }
+enum class Stage { Lang, Welcome, Details, Otp, Onboarding, Processing, App }
 enum class Role { Patient, Family }
 enum class Overlay { Settings, LangPick, Add }
 enum class PTab { Today, Care, Checkin, Help }
 enum class FTab { Home, Meds, Bills, Claim, Care }
 enum class Sheet { Query, Approve }
+
+data class UploadedDoc(
+    val uri: Uri,
+    val name: String,
+    val sizeBytes: Long,
+    val mimeType: String,
+) {
+    val formattedSize: String get() {
+        val kb = sizeBytes / 1024.0
+        return if (kb >= 1024) {
+            String.format(java.util.Locale.US, "%.1f MB", kb / 1024.0)
+        } else {
+            String.format(java.util.Locale.US, "%d KB", (kb + 0.5).toInt().coerceAtLeast(1))
+        }
+    }
+    val isPdf: Boolean get() = mimeType.contains("pdf", ignoreCase = true) || name.endsWith(".pdf", ignoreCase = true)
+}
+
+data class OnboardingFamilyMember(
+    val name: String,
+    val phone: String,
+    val canApprove: Boolean,
+)
 
 data class Member(val name: String, val rel: String, val role: String, val you: Boolean, val phone: String = "")
 
@@ -115,31 +139,98 @@ class MedSureViewModel : ViewModel() {
     fun onOtpE(v: String) { otpE = digits(v).take(6) }
     fun sendCodes() { otpP = ""; otpE = ""; stage = Stage.Otp }
 
+    // Onboarding (held in-memory, survives going back and forth between steps)
+    var onboardingStep by mutableIntStateOf(1)
+    var onbFullName by mutableStateOf("")
+    var onbAge by mutableStateOf("")
+    var onbGender by mutableStateOf<String?>(null)
+    var onbBloodGroup by mutableStateOf<String?>(null)
+    var onbInteractedName by mutableStateOf(false)
+    var onbInteractedAge by mutableStateOf(false)
+    val onbReports = mutableStateListOf<UploadedDoc>()
+    val onbBills = mutableStateListOf<UploadedDoc>()
+    var onbInsCompany by mutableStateOf("")
+    var onbInsPolicy by mutableStateOf("")
+    var onbInsDoc by mutableStateOf<UploadedDoc?>(null)
+    val onbFamilyMembers = mutableStateListOf<OnboardingFamilyMember>()
+
+    val onbStep1Valid: Boolean
+        get() = onbFullName.trim().isNotEmpty() &&
+                (onbAge.toIntOrNull()?.let { it in 1..120 } == true) &&
+                onbGender != null &&
+                onbBloodGroup != null
+
+    fun nextOnboardingStep() {
+        if (onboardingStep < 4) {
+            onboardingStep += 1
+        } else {
+            stage = Stage.Processing
+        }
+    }
+
+    fun prevOnboardingStep() {
+        if (onboardingStep > 1) {
+            onboardingStep -= 1
+        } else {
+            stage = Stage.Otp
+        }
+    }
+
+    fun completeProcessing() {
+        stage = Stage.App
+        overlay = null
+        ptab = PTab.Today
+        ftab = FTab.Home
+        saveOnboarding()
+    }
+
     fun verify() {
         if (!canVerify) return
         if (loginRole == Role.Family) {
             if (members.isEmpty()) members.add(Member("Arjun", "son", "approve", true))
             else members.indices.forEach { i -> members[i] = members[i].copy(you = i == 0) }
+            role = Role.Family
+            overlay = null; ptab = PTab.Today; ftab = FTab.Home
+            stage = Stage.App
         } else {
             members.indices.forEach { i -> members[i] = members[i].copy(you = false) }
+            role = Role.Patient
+            onboardingStep = 1
+            stage = Stage.Onboarding
         }
-        role = loginRole
-        overlay = null; ptab = PTab.Today; ftab = FTab.Home
-        stage = Stage.App
 
-        val asPatient = isPatient
+        // Family lands in the app now. A patient's case is created when onboarding finishes.
         val name = me
         sync("Sign-in") {
             Backend.signIn()
             Backend.saveProfile(name, phone, email) // also joins any case this phone or email was invited to
-            caseId = Backend.firstCaseId() ?: if (asPatient) Backend.createCase(name, "self") else null
+            caseId = Backend.firstCaseId()
+            Backend.registerDevice()
+        }
+    }
+
+    /** Sends what the patient entered during onboarding: their name, their case and the helpers they added. */
+    private fun saveOnboarding() {
+        val name = onbFullName.trim().ifEmpty { me }
+        val helpers = onbFamilyMembers.toList()
+        helpers.forEach { h ->
+            if (members.none { it.name == h.name && it.phone == h.phone }) {
+                members.add(Member(h.name, "other", if (h.canApprove) "approve" else "view", false, h.phone))
+            }
+        }
+        sync("Onboarding") {
+            Backend.signIn()
+            Backend.saveProfile(name, phone, email)
+            val id = caseId ?: Backend.firstCaseId() ?: Backend.createCase(name, "self")
+            caseId = id
+            helpers.forEach { Backend.addMember(id, it.name, "family", it.canApprove, it.phone, "") }
             Backend.registerDevice()
         }
     }
 
     fun logout() {
         stage = Stage.Welcome; overlay = null; otpP = ""; otpE = ""; sheet = null
-        ptab = PTab.Today; ftab = FTab.Home
+        ptab = PTab.Today; ftab = FTab.Home; onboardingStep = 1
         caseId = null
         sync("Sign-out") { Backend.signOut() }
     }
@@ -196,7 +287,7 @@ class MedSureViewModel : ViewModel() {
         sync("Invite") { Backend.addMember(id, added.name, added.rel, added.role == "approve", invitePhone, inviteEmail) }
     }
 
-    val me: String get() = if (isPatient) "Lakshmi" else (members.firstOrNull { it.you }?.name ?: "Arjun")
+    val me: String get() = if (isPatient) onbFullName.trim().substringBefore(' ').ifEmpty { "Lakshmi" } else (members.firstOrNull { it.you }?.name ?: "Arjun")
 
     fun relLabel(rel: String) = tx["r" + rel.replaceFirstChar { it.uppercase() }]
     fun roleLabel(r: String) = if (r == "approve") tx["canApprove"] else tx["canView"]
