@@ -7,10 +7,14 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.Color
+import android.util.Log
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
 import com.powerbank.medsure.i18n.AllLanguages
 import com.powerbank.medsure.i18n.Tx
+import com.powerbank.medsure.net.Backend
 import com.powerbank.medsure.ui.theme.Ms
+import kotlinx.coroutines.launch
 
 enum class Stage { Lang, Welcome, Details, Otp, App }
 enum class Role { Patient, Family }
@@ -121,11 +125,33 @@ class MedSureViewModel : ViewModel() {
         role = loginRole
         overlay = null; ptab = PTab.Today; ftab = FTab.Home
         stage = Stage.App
+
+        val asPatient = isPatient
+        val name = me
+        sync("Sign-in") {
+            Backend.signIn()
+            Backend.saveProfile(name, phone, email) // also joins any case this phone or email was invited to
+            caseId = Backend.firstCaseId() ?: if (asPatient) Backend.createCase(name, "self") else null
+            Backend.registerDevice()
+        }
     }
 
     fun logout() {
         stage = Stage.Welcome; overlay = null; otpP = ""; otpE = ""; sheet = null
         ptab = PTab.Today; ftab = FTab.Home
+        caseId = null
+        sync("Sign-out") { Backend.signOut() }
+    }
+
+    // ---------- Backend ----------
+    /** The case this user is on, once the backend has confirmed it. */
+    var caseId by mutableStateOf<Int?>(null)
+
+    /** Runs a backend call without blocking the screens, which keep working if it fails. */
+    private fun sync(what: String, block: suspend () -> Unit) {
+        viewModelScope.launch {
+            try { block() } catch (e: Exception) { Log.w("MedSure", "$what failed", e) }
+        }
     }
 
     // ---------- Overlays ----------
@@ -144,8 +170,13 @@ class MedSureViewModel : ViewModel() {
 
     fun submitAdd() {
         if (!canAdd) return
-        members.add(Member(fName.trim(), fRel, if (isPatient) "approve" else fRole, false))
+        val added = Member(fName.trim(), fRel, if (isPatient) "approve" else fRole, false)
+        members.add(added)
         overlay = if (prevOverlay == Overlay.Settings) Overlay.Settings else null
+
+        val id = caseId ?: return
+        val (invitePhone, inviteEmail) = fPhone to fEmail
+        sync("Invite") { Backend.addMember(id, added.name, added.rel, added.role == "approve", invitePhone, inviteEmail) }
     }
 
     val me: String get() = if (isPatient) "Lakshmi" else (members.firstOrNull { it.you }?.name ?: "Arjun")
@@ -194,7 +225,14 @@ class MedSureViewModel : ViewModel() {
             }
         }
     val medWarn get() = !asking && (ans.getOrNull(2) ?: 0) > 0
-    fun answer(lvl: Int) { ans.add(lvl); step += 1; listening = false }
+    fun answer(lvl: Int) {
+        ans.add(lvl); step += 1; listening = false
+        val id = caseId
+        if (ciDone && id != null) {
+            val levels = ans.toList()
+            sync("Check-in") { Backend.checkin(id, levels, noteSaved) } // family is notified when it needs attention
+        }
+    }
     fun resetCi() { step = 0; ans.clear(); listening = false; note = ""; noteSaved = "" }
     fun saveNote() { if (note.isNotBlank()) { noteSaved = note.trim(); note = "" } }
 
