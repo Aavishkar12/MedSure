@@ -1,5 +1,6 @@
 package com.powerbank.medsure.state
 
+import android.net.Uri
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
@@ -12,12 +13,35 @@ import com.powerbank.medsure.i18n.AllLanguages
 import com.powerbank.medsure.i18n.Tx
 import com.powerbank.medsure.ui.theme.Ms
 
-enum class Stage { Lang, Welcome, Details, Otp, App }
+enum class Stage { Lang, Welcome, Details, Otp, Onboarding, Processing, App }
 enum class Role { Patient, Family }
 enum class Overlay { Settings, LangPick, Add }
 enum class PTab { Today, Care, Checkin, Help }
 enum class FTab { Home, Meds, Bills, Claim, Care }
 enum class Sheet { Query, Approve }
+
+data class UploadedDoc(
+    val uri: Uri,
+    val name: String,
+    val sizeBytes: Long,
+    val mimeType: String,
+) {
+    val formattedSize: String get() {
+        val kb = sizeBytes / 1024.0
+        return if (kb >= 1024) {
+            String.format(java.util.Locale.US, "%.1f MB", kb / 1024.0)
+        } else {
+            String.format(java.util.Locale.US, "%d KB", (kb + 0.5).toInt().coerceAtLeast(1))
+        }
+    }
+    val isPdf: Boolean get() = mimeType.contains("pdf", ignoreCase = true) || name.endsWith(".pdf", ignoreCase = true)
+}
+
+data class OnboardingFamilyMember(
+    val name: String,
+    val phone: String,
+    val canApprove: Boolean,
+)
 
 data class Member(val name: String, val rel: String, val role: String, val you: Boolean)
 
@@ -110,22 +134,69 @@ class MedSureViewModel : ViewModel() {
     fun onOtpE(v: String) { otpE = digits(v).take(6) }
     fun sendCodes() { otpP = ""; otpE = ""; stage = Stage.Otp }
 
+    // Onboarding (held in-memory, survives going back and forth between steps)
+    var onboardingStep by mutableIntStateOf(1)
+    var onbFullName by mutableStateOf("")
+    var onbAge by mutableStateOf("")
+    var onbGender by mutableStateOf<String?>(null)
+    var onbBloodGroup by mutableStateOf<String?>(null)
+    var onbInteractedName by mutableStateOf(false)
+    var onbInteractedAge by mutableStateOf(false)
+    val onbReports = mutableStateListOf<UploadedDoc>()
+    val onbBills = mutableStateListOf<UploadedDoc>()
+    var onbInsCompany by mutableStateOf("")
+    var onbInsPolicy by mutableStateOf("")
+    var onbInsDoc by mutableStateOf<UploadedDoc?>(null)
+    val onbFamilyMembers = mutableStateListOf<OnboardingFamilyMember>()
+
+    val onbStep1Valid: Boolean
+        get() = onbFullName.trim().isNotEmpty() &&
+                (onbAge.toIntOrNull()?.let { it in 1..120 } == true) &&
+                onbGender != null &&
+                onbBloodGroup != null
+
+    fun nextOnboardingStep() {
+        if (onboardingStep < 4) {
+            onboardingStep += 1
+        } else {
+            stage = Stage.Processing
+        }
+    }
+
+    fun prevOnboardingStep() {
+        if (onboardingStep > 1) {
+            onboardingStep -= 1
+        } else {
+            stage = Stage.Otp
+        }
+    }
+
+    fun completeProcessing() {
+        stage = Stage.App
+        overlay = null
+        ptab = PTab.Today
+        ftab = FTab.Home
+    }
+
     fun verify() {
         if (!canVerify) return
         if (loginRole == Role.Family) {
             if (members.isEmpty()) members.add(Member("Arjun", "son", "approve", true))
             else members.indices.forEach { i -> members[i] = members[i].copy(you = i == 0) }
+            role = Role.Family
+            overlay = null; ptab = PTab.Today; ftab = FTab.Home
+            stage = Stage.App
         } else {
             members.indices.forEach { i -> members[i] = members[i].copy(you = false) }
+            role = Role.Patient
+            onboardingStep = 1
+            stage = Stage.Onboarding
         }
-        role = loginRole
-        overlay = null; ptab = PTab.Today; ftab = FTab.Home
-        stage = Stage.App
     }
 
     fun logout() {
         stage = Stage.Welcome; overlay = null; otpP = ""; otpE = ""; sheet = null
-        ptab = PTab.Today; ftab = FTab.Home
+        ptab = PTab.Today; ftab = FTab.Home; onboardingStep = 1
     }
 
     // ---------- Overlays ----------
