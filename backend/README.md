@@ -19,8 +19,15 @@ cp .env.example .env                                       # then fill in; ask R
 
 API docs: http://localhost:8000
 
-With the default `.env` it runs on a local SQLite file, no Firebase and canned AI results, so you can
-start without any accounts.
+With the default `.env` it runs on a local SQLite file and no Firebase, so you can start without any
+accounts. Without `GROQ_API_KEY` documents are read by the rule-based parsers only: typed documents in
+the usual layouts work, anything else is marked failed with a message saying the AI is not configured.
+The backend never returns sample data in place of a document it could not read.
+
+**OCR for scanned PDFs and photos** needs the Tesseract program as well as the Python packages:
+Windows: install from https://github.com/UB-Mannheim/tesseract/wiki and set `TESSERACT_CMD` in `.env`
+if it is not on PATH; macOS: `brew install tesseract`; Debian/Ubuntu: `apt install tesseract-ocr`.
+Without it, scans are still read when `GROQ_API_KEY` is set (the vision model reads the page images).
 
 ## Auth
 
@@ -44,15 +51,23 @@ MedSure integrates server-side Groq LLMs (`GROQ_API_KEY`) to extract structured 
 - **Hospital Bills:** Line items, descriptions, quantities, unit prices, arithmetic reconciliation against stated subtotal/discounts/tax/total, and billing review flags.
 - **Prescriptions:** Prescribed medications, dosage instructions, duration, safety confirmation flags.
 - **Lab Reports:** Test panels, units, reference intervals, high/low abnormality status flags.
-- **Insurance Policies:** Policy details, coverage limits, copay, exclusions, preauth clauses.
+- **Insurance Policies:** Sum insured, room-rent limit, co-pay, sub-limits, exclusions, non-payable items, waiting periods (`GET /cases/{case_id}/policy`).
+- **Insurance coverage (`GET`/`POST /cases/{case_id}/coverage`):** every bill line compared with the policy: covered, partly covered, not covered or unclear, with a plain reason and a quote from the policy. The AI judges each line; co-pay, deductible, the sum-insured cap and all totals are computed in code, and policy quotes are checked against the policy text. Runs by itself once both a bill and a policy have been read.
 - **Grounded Q&A (`POST /cases/{case_id}/ask`):** Answering user questions grounded strictly in their uploaded case documents with source document, page, and exact quotes.
+
+How a document is read: file -> text (PDF text layer, OCR text sent by the phone, or Tesseract) ->
+document type (the upload category, corrected by `app/pipeline/classifier.py` when the text clearly says
+otherwise) -> structured data. Medicines and tests the AI names that do not appear in the document text
+are dropped. Upload with `POST /cases/{id}/documents` (field `file`, or several `files`), then poll
+`GET /documents/{id}` or `GET /jobs/{job_id}`; `POST /documents/{id}/retry` reads a failed one again.
 
 ## Running Tests
 
 Run the automated backend test suite:
 ```bash
-python -m pytest tests/test_llm_documents.py -v
+.venv/Scripts/python -m pytest
 ```
+The tests never call Groq: the AI replies are mocked.
 
 ## Connecting Android Emulator or Physical Device
 
