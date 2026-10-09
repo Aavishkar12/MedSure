@@ -1,15 +1,19 @@
-import os
+"""Uploaded file -> text with [Page N] markers. Uses the PDF text layer where there is one and OCR otherwise.
+
+OCR needs the Tesseract program (https://github.com/tesseract-ocr/tesseract). When it is missing,
+scanned pages come back empty with a warning and the vision model reads the page images instead.
+"""
+
+import io
 import shutil
 from pathlib import Path
-from typing import List, Tuple, Optional
-from PIL import Image
-
-try:
-    import pytesseract
-except ImportError:
-    pytesseract = None
+from typing import List, Optional, Tuple
 
 from ..config import settings
+
+IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".webp")
+TEXT_EXTENSIONS = (".txt",)
+OCR_DPI = 200  # Tesseract reads 200-300 dpi best; higher is slow for little gain
 
 
 class PageExtraction:
@@ -29,7 +33,7 @@ class DocumentTextResult:
         primary_method: str,
         confidence: float,
         warnings: List[str],
-        full_text: str
+        full_text: str,
     ):
         self.pages = pages
         self.page_count = page_count
@@ -41,158 +45,115 @@ class DocumentTextResult:
 
 def _is_usable_text(text: str) -> bool:
     """A page has usable text if it has at least 30 non-whitespace characters."""
-    stripped = "".join(text.split())
-    return len(stripped) >= 30
+    return len("".join(text.split())) >= 30
 
 
-def _ocr_image_file(image_path: Path, tesseract_cmd: Optional[str] = None) -> Tuple[str, float, Optional[str]]:
-    """Runs OCR on an image file. Returns (text, confidence, warning)."""
-    if not pytesseract:
-        return "", 0.0, "pytesseract library not available for OCR."
-
-    cmd = tesseract_cmd or settings.tesseract_cmd or shutil.which("tesseract")
-    if cmd:
-        pytesseract.pytesseract.tesseract_cmd = cmd
-    else:
-        return "", 0.0, "Tesseract executable not found in PATH or configuration."
-
+def _tesseract() -> Tuple[object, Optional[str]]:
+    """(pytesseract module, None) when OCR can run, otherwise (None, reason)."""
     try:
-        with Image.open(image_path) as img:
-            # Basic preprocessing: grayscale
-            gray = img.convert("L")
-            text = pytesseract.image_to_string(gray, lang="eng")
-            return text.strip(), 0.85, None
+        import pytesseract
+    except ImportError:
+        return None, "OCR is unavailable: the pytesseract package is not installed."
+    cmd = settings.tesseract_cmd or shutil.which("tesseract")
+    if not cmd:
+        return None, "OCR is unavailable: Tesseract is not installed or TESSERACT_CMD is not set."
+    pytesseract.pytesseract.tesseract_cmd = cmd
+    return pytesseract, None
+
+
+def _ocr_image_bytes(data: bytes) -> Tuple[str, float, Optional[str]]:
+    """OCR one page image. Returns (text, confidence 0-1, warning)."""
+    pytesseract, reason = _tesseract()
+    if pytesseract is None:
+        return "", 0.0, reason
+    try:
+        from PIL import Image, ImageOps
+
+        with Image.open(io.BytesIO(data)) as img:
+            gray = ImageOps.exif_transpose(img).convert("L")  # phone photos carry their rotation in EXIF
+            ocr = pytesseract.image_to_data(gray, lang="eng", output_type=pytesseract.Output.DICT)
     except Exception as e:
-        return "", 0.0, f"OCR processing failed: {type(e).__name__}"
+        return "", 0.0, f"OCR failed: {type(e).__name__}: {e}"
+
+    # Rebuild lines from Tesseract's word boxes, and average the confidence of the words it kept.
+    lines: dict[tuple, list[str]] = {}
+    confs = []
+    for i, word in enumerate(ocr["text"]):
+        conf = float(ocr["conf"][i])
+        if not word.strip() or conf < 0:
+            continue
+        key = (ocr["block_num"][i], ocr["par_num"][i], ocr["line_num"][i])
+        lines.setdefault(key, []).append(word)
+        confs.append(conf)
+    text = "\n".join(" ".join(words) for words in lines.values())
+    confidence = round(sum(confs) / len(confs) / 100, 2) if confs else 0.0
+    return text.strip(), confidence, None
 
 
-def extract_document_text(file_path: str) -> DocumentTextResult:
+def _result(pages: List[PageExtraction], page_count: int, warnings: List[str]) -> DocumentTextResult:
+    ocr_pages = sum(p.method == "ocr" for p in pages)
+    primary = "ocr" if ocr_pages > len(pages) - ocr_pages else "text_layer"
+    confidence = round(sum(p.confidence for p in pages) / len(pages), 2) if pages else 0.0
+    full_text = "\n\n".join(f"[Page {p.page_num}]\n{p.text}" for p in pages if p.text)
+    return DocumentTextResult(pages, page_count, primary, confidence, warnings, full_text)
+
+
+def extract_document_text(file_path: str, supplied_text: Optional[str] = None) -> DocumentTextResult:
     """
-    Extracts text page-by-page from a PDF or image file.
-    Prefers direct digital PDF text layer. Falls back to OCR when text layer is absent or for image files.
+    Text page by page. supplied_text (OCR done on the phone) wins when it is usable.
+    PDFs use their own text layer, and pages without one are rendered and OCR'd. Images are OCR'd.
     """
-    path = Path(file_path)
-    if not path.exists():
-        return DocumentTextResult(
-            pages=[],
-            page_count=0,
-            primary_method="unknown",
-            confidence=0.0,
-            warnings=["File not found"],
-            full_text=""
-        )
+    if supplied_text and _is_usable_text(supplied_text):
+        text = supplied_text.strip()
+        if "[Page " not in text:
+            text = f"[Page 1]\n{text}"
+        page_count = max(text.count("[Page "), 1)
+        page = PageExtraction(1, text, method="device_ocr", confidence=0.9)
+        return DocumentTextResult([page], page_count, "device_ocr", 0.9, [], text)
+
+    path = Path(file_path) if file_path else None
+    if not path or not path.exists():
+        return DocumentTextResult([], 0, "unknown", 0.0, ["File not found"], "")
 
     ext = path.suffix.lower()
-    pages: List[PageExtraction] = []
     warnings: List[str] = []
 
-    # 1. Image formats (direct OCR path)
-    if ext in (".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"):
-        text, conf, warn = _ocr_image_file(path)
+    if ext in TEXT_EXTENSIONS:
+        text = path.read_text(encoding="utf-8", errors="replace").strip()
+        return _result([PageExtraction(1, text, "text_layer", 1.0, not text)], 1, warnings)
+
+    if ext in IMAGE_EXTENSIONS:
+        text, conf, warn = _ocr_image_bytes(path.read_bytes())
         if warn:
             warnings.append(warn)
-        page = PageExtraction(page_num=1, text=text, method="ocr", confidence=conf, is_blank=not bool(text))
-        pages.append(page)
-        full_text = f"[Page 1]\n{text}" if text else ""
-        return DocumentTextResult(
-            pages=pages,
-            page_count=1,
-            primary_method="ocr",
-            confidence=conf,
-            warnings=warnings,
-            full_text=full_text
-        )
+        return _result([PageExtraction(1, text, "ocr", conf, not text)], 1, warnings)
 
-    # 2. PDF Documents
     if ext == ".pdf":
         try:
-            import pypdf
-            reader = pypdf.PdfReader(str(path))
-            total_pages = len(reader.pages)
-            if total_pages == 0:
+            import pymupdf
+
+            pages: List[PageExtraction] = []
+            with pymupdf.open(path) as pdf:
+                for i, page in enumerate(pdf, start=1):
+                    layer = page.get_text().strip()
+                    if _is_usable_text(layer):
+                        pages.append(PageExtraction(i, layer, "text_layer", 0.98))
+                        continue
+                    # Scanned page: render it and OCR the picture.
+                    png = page.get_pixmap(dpi=OCR_DPI).tobytes("png")
+                    text, conf, warn = _ocr_image_bytes(png)
+                    if warn and warn not in warnings:
+                        warnings.append(warn)
+                    if text:
+                        pages.append(PageExtraction(i, text, "ocr", conf))
+                    else:
+                        pages.append(PageExtraction(i, layer, "text_layer", 0.2, is_blank=True))
+                        warnings.append(f"Page {i} has no readable text")
+                page_count = pdf.page_count
+            if page_count == 0:
                 warnings.append("PDF contains 0 pages")
-                return DocumentTextResult([], 0, "text_layer", 0.0, warnings, "")
-
-            ocr_pages_count = 0
-            text_pages_count = 0
-
-            for i, page_obj in enumerate(reader.pages, start=1):
-                try:
-                    page_text = page_obj.extract_text() or ""
-                except Exception as ex:
-                    page_text = ""
-                    warnings.append(f"Page {i} text layer extraction failed: {str(ex)}")
-
-                if _is_usable_text(page_text):
-                    pages.append(PageExtraction(page_num=i, text=page_text.strip(), method="text_layer", confidence=0.98))
-                    text_pages_count += 1
-                else:
-                    # Page lacks usable text layer, needs OCR fallback
-                    # Check if images exist on this PDF page
-                    page_ocr_text = ""
-                    ocr_conf = 0.0
-                    ocr_warn = None
-
-                    # If page has embedded images, attempt OCR on them
-                    if hasattr(page_obj, "images") and len(page_obj.images) > 0:
-                        try:
-                            # Try OCR on first main image of page
-                            first_img = page_obj.images[0]
-                            from io import BytesIO
-                            img_bytes = BytesIO(first_img.data)
-                            with Image.open(img_bytes) as img:
-                                gray = img.convert("L")
-                                if pytesseract and (settings.tesseract_cmd or shutil.which("tesseract")):
-                                    if settings.tesseract_cmd:
-                                        pytesseract.pytesseract.tesseract_cmd = settings.tesseract_cmd
-                                    page_ocr_text = pytesseract.image_to_string(gray, lang="eng").strip()
-                                    ocr_conf = 0.8
-                                else:
-                                    ocr_warn = f"Page {i} lacks text layer and Tesseract OCR is unavailable"
-                        except Exception as ocr_ex:
-                            ocr_warn = f"Page {i} OCR attempt error: {type(ocr_ex).__name__}"
-                    else:
-                        ocr_warn = f"Page {i} has little or no usable text layer"
-
-                    if ocr_warn:
-                        warnings.append(ocr_warn)
-
-                    if page_ocr_text:
-                        pages.append(PageExtraction(page_num=i, text=page_ocr_text, method="ocr", confidence=ocr_conf))
-                        ocr_pages_count += 1
-                    else:
-                        pages.append(PageExtraction(page_num=i, text=page_text.strip(), method="text_layer", confidence=0.2, is_blank=True))
-
-            # Determine dominant extraction method & overall confidence
-            if ocr_pages_count > text_pages_count:
-                primary_method = "ocr"
-            else:
-                primary_method = "text_layer"
-
-            avg_conf = sum(p.confidence for p in pages) / max(len(pages), 1)
-
-            # Build structured text with page boundaries
-            formatted_pages = []
-            for p in pages:
-                if p.text:
-                    formatted_pages.append(f"[Page {p.page_num}]\n{p.text}")
-                else:
-                    formatted_pages.append(f"[Page {p.page_num}]\n(No usable text)")
-            full_text = "\n\n".join(formatted_pages)
-
-            return DocumentTextResult(
-                pages=pages,
-                page_count=total_pages,
-                primary_method=primary_method,
-                confidence=round(avg_conf, 2),
-                warnings=warnings,
-                full_text=full_text
-            )
-
+            return _result(pages, page_count, warnings)
         except Exception as e:
-            warnings.append(f"Failed to read PDF: {str(e)}")
-            return DocumentTextResult([], 0, "text_layer", 0.0, warnings, "")
+            return DocumentTextResult([], 0, "text_layer", 0.0, [f"Failed to read PDF: {e}"], "")
 
-    # Unsupported file extension
-    warnings.append(f"Unsupported file format: {ext}")
-    return DocumentTextResult([], 0, "unknown", 0.0, warnings, "")
+    return DocumentTextResult([], 0, "unknown", 0.0, [f"Unsupported file format: {ext}"], "")

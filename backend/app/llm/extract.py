@@ -2,9 +2,10 @@
 
 import json
 import logging
+import re
 from typing import Literal, Optional, TypeVar
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ValidationError
 
 from .client import complete_json
 
@@ -59,10 +60,17 @@ class FollowUp(BaseModel):
 
 
 class DischargeCardData(BaseModel):
+    summary: str = ""  # what happened during this stay, in plain words
+    hospital: Optional[str] = None
+    doctor: Optional[str] = None
+    admission_date: Optional[str] = None
+    discharge_date: Optional[str] = None
     diagnosis: Diagnosis
+    other_diagnoses: list[Diagnosis] = []
     medicines: list[Medicine] = []
     lab_values: list[LabValue] = []
     precautions: list[Precaution] = []
+    warning_signs: list[Precaution] = []  # when the document says to get help
     follow_ups: list[FollowUp] = []
 
 
@@ -128,22 +136,43 @@ class LabReportData(BaseModel):
 
 
 # --- Insurance Policy Extraction Model ---
+class SubLimit(BaseModel):
+    item: str  # e.g. "Cataract surgery", "ICU per day"
+    limit: str  # as written, e.g. "Rs 40,000 per eye" or "2% of sum insured"
+    limit_amount: Optional[float] = None  # rupees, only when the policy states a fixed amount
+    source_page: Optional[int] = None
+
+
 class PolicyData(BaseModel):
     policy_number: Optional[str] = None
     insurer: Optional[str] = None
     policyholder_name: Optional[str] = None
-    sum_insured: Optional[str] = None
-    room_rent_limit: Optional[str] = None
-    copay: Optional[str] = None
+    insured_members: list[str] = []
+    policy_start: Optional[str] = None
+    policy_end: Optional[str] = None
+    sum_insured: Optional[float] = None  # rupees
+    room_rent_limit: Optional[str] = None  # as written
+    room_rent_limit_per_day: Optional[float] = None  # rupees, only when a fixed amount is stated
+    copay_percent: Optional[float] = None  # e.g. 10 for "10% co-payment"
+    deductible: Optional[float] = None
+    pre_hospitalisation_days: Optional[int] = None
+    post_hospitalisation_days: Optional[int] = None
+    sub_limits: list[SubLimit] = []
     exclusions: list[str] = []
+    non_payable_items: list[str] = []  # consumables / items the policy lists as not payable
+    waiting_periods: list[str] = []
     preauth_requirement: Optional[str] = None
     claim_submission_deadline: Optional[str] = None
+    plain_summary: str = ""  # what this policy pays for, in two or three plain sentences
     source_page: Optional[int] = None
 
 
 RULES = f"""You explain a patient's own hospital documents to their family in plain, calm language.
 Rules:
-- Use ONLY what is written in the document. If something is not there, leave it empty. Never guess.
+- Use ONLY what is written in the document. If something is not there, leave it empty. Never guess,
+  and never fill in a typical value: a medicine, dose, test result or date that is not in this
+  document must not appear in your reply.
+- Copy names of medicines, tests and diagnoses exactly as the document spells them.
 - Do not diagnose, predict outcomes, or recommend treatment. Explain what the document already says.
 - Write explanations for someone with no medical background, one or two short sentences each.
   Use everyday words ("protects the stomach from acid", not "acid suppression") and say what a
@@ -157,13 +186,22 @@ Rules:
 Reply with a single JSON object matching this JSON Schema:
 """
 
-CARD_TASK = "Extract a Discharge Card from this discharge summary / medical record."
-BILL_TASK = """Extract every billed line item from this hospital bill.
+CARD_TASK = """Extract a Discharge Card from this discharge summary / medical record.
+- summary: two to four plain sentences on why the patient was admitted, what was done and how they
+  were at discharge, using only what the document says.
+- diagnosis: the main (final / discharge) diagnosis. Put any other diagnoses in other_diagnoses.
+- medicines: every medicine in the discharge / home medication list with its dose, how often and for
+  how long, exactly as written. Do not include medicines that were only given in hospital and stopped.
+  Write the schedule in plain words ("twice a day, morning and night" for BD / 1-0-1).
+- precautions: diet, activity and care advice from the document.
+- warning_signs: the symptoms the document says need urgent attention or a call to the doctor.
+- follow_ups: each review visit or test the document asks for, with when it is due."""
+BILL_TASK = """Extract every billed line item from this hospital bill. Skip subtotals, totals, taxes and payments.
 Extract unit prices, quantities, and line amounts where visible.
 Set worth_asking to true only for things visible in the bill itself: duplicated lines, unusually
 high quantities, or vague descriptions like "miscellaneous". Give the reason in ask_reason, phrased
 as a neutral question for the billing desk, never as an accusation.
-Calculate total_billed if present on the document."""
+Set total_billed to the bill's printed grand total if there is one."""
 PRESCRIPTION_TASK = """Extract all prescribed medications from this medical prescription.
 Preserve exact medicine names, dosage frequencies, forms, and instructions as written.
 If handwriting is ambiguous or instructions appear contradictory, set flag_for_confirmation to true
@@ -172,8 +210,13 @@ LAB_TASK = """Extract all laboratory test results from this diagnostic report.
 Preserve exact reported values, units, and reference ranges.
 Categorize flag as low, normal, high, abnormal, or unknown based ONLY on the report's reference range.
 Provide a calm, plain explanation of what each test measures."""
-POLICY_TASK = """Extract key health insurance policy clauses from this policy document.
-Extract sum insured, room rent limits, copay clauses, pre-authorization deadlines, and claim requirements.
+POLICY_TASK = """Extract the health insurance policy terms that decide what a hospital bill claim pays.
+- Amounts are in rupees as plain numbers (500000, not "5 lakh"). Leave a number null unless the policy
+  states a fixed amount; keep the wording in the matching text field (e.g. room_rent_limit "1% of sum insured per day").
+- copay_percent: the co-payment percentage that applies to this insured person, if any.
+- sub_limits: every cap on a specific treatment, room type, ICU, ambulance, etc.
+- exclusions, non_payable_items, waiting_periods: list each one as written, briefly.
+- plain_summary: two or three plain sentences on what this policy pays for and its main limits.
 Distinguish explicit policy text from any interpretation. Never guarantee claim approval."""
 
 T = TypeVar("T", bound=BaseModel)
@@ -181,7 +224,12 @@ T = TypeVar("T", bound=BaseModel)
 
 def _extract(schema: type[T], task: str, text: str, images: list[bytes]) -> T:
     system = RULES + json.dumps(schema.model_json_schema())
-    body = f"Document text:\n{text[:MAX_TEXT_CHARS]}" if text else "The document pages are attached as images."
+    if text and images:
+        body = f"OCR text of the attached pages (may contain reading errors; trust the images):\n{text[:MAX_TEXT_CHARS]}"
+    elif text:
+        body = f"Document text:\n{text[:MAX_TEXT_CHARS]}"
+    else:
+        body = "The document pages are attached as images."
     user = f"{task}\n\n{body}"
     error = ""
     for _ in range(2):  # one retry with the validation error fed back
@@ -197,10 +245,39 @@ def _clean_concept(value: Optional[str]) -> Optional[str]:
     return value if value in CONCEPTS else None
 
 
+def _norm(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", text.casefold()).strip()
+
+
+# Dosage-form words that come before a medicine's name and say nothing about which medicine it is.
+_FORM_WORDS = {"tab", "tabs", "tablet", "cap", "caps", "capsule", "inj", "injection", "syp", "syrup", "susp", "oint", "gel", "drops", "t", "c"}
+
+
+def in_document(name: str, doc_text: str) -> bool:
+    """True when the distinctive word of a name (medicine, test) appears in the document text."""
+    words = [w for w in _norm(name).split() if w not in _FORM_WORDS and not w.isdigit()]
+    key = max(words, key=len, default="")
+    if len(key) < 3:
+        return True  # too short to check reliably
+    return f" {key[:6]}" in f" {_norm(doc_text)}"  # first 6 letters: tolerates plural / brand suffixes
+
+
 def extract_discharge_card(text: str, images: list[bytes] | None = None) -> dict:
     card = _extract(DischargeCardData, CARD_TASK, text, images or [])
     for lab in card.lab_values:
         lab.concept = _clean_concept(lab.concept)
+    if text and not images:
+        # Grounding check: a medicine or test the model names must be in this document.
+        # Lab names are often abbreviated in reports ("Hb"), so a lab value may match on its number instead.
+        def lab_found(lab: LabValue) -> bool:
+            return in_document(lab.name, text) or (lab.value.strip() != "" and lab.value.strip() in text)
+
+        dropped = [m.name for m in card.medicines if not in_document(m.name, text)]
+        dropped += [lab.name for lab in card.lab_values if not lab_found(lab)]
+        if dropped:
+            logger.warning(f"Dropped items not found in the document: {dropped}")
+        card.medicines = [m for m in card.medicines if in_document(m.name, text)]
+        card.lab_values = [lab for lab in card.lab_values if lab_found(lab)]
     return {**card.model_dump(), "disclaimer": DISCLAIMER}
 
 
@@ -225,6 +302,8 @@ def extract_bill(text: str, images: list[bytes] | None = None) -> list[dict]:
 
 def extract_prescription(text: str, images: list[bytes] | None = None) -> dict:
     rx = _extract(PrescriptionData, PRESCRIPTION_TASK, text, images or [])
+    if text and not images:
+        rx.medicines = [m for m in rx.medicines if in_document(m.medicine_name, text)]
     return {**rx.model_dump(), "disclaimer": DISCLAIMER}
 
 

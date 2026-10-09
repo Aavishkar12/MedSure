@@ -97,11 +97,35 @@ def test_extract_discharge_card_success():
     }
 
     with patch("app.llm.client._chat", return_value=json.dumps(mock_payload)):
-        result = llm.extract_discharge_card("Discharge summary text...")
+        result = llm.extract_discharge_card("[Page 2]\nSerum Potassium 4.2 mEq/L (3.5 - 5.0)\nDischarge medicines: Tab Furosemide 40 mg once daily in morning")
         assert result["diagnosis"]["name"] == "Congestive Heart Failure (NYHA Class II)"
         assert len(result["medicines"]) == 1
         assert result["medicines"][0]["name"] == "Furosemide"
         assert result["lab_values"][0]["status"] == "normal"
+
+
+def test_discharge_card_drops_medicines_not_in_document():
+    """The model must not add a medicine the report does not mention (e.g. one from a typical treatment)."""
+    mock_payload = {
+        "summary": "Admitted with fluid on the lungs; treated and discharged stable.",
+        "diagnosis": {"name": "Heart failure", "plain": "The heart was not pumping strongly enough.", "source_page": 1},
+        "medicines": [
+            {"name": "Tab Furosemide", "dose": "40 mg", "schedule": "once a day", "source_page": 1},
+            {"name": "Pantoprazole", "dose": "40 mg", "schedule": "before breakfast", "source_page": 1},
+        ],
+        "lab_values": [
+            {"name": "Hb", "value": "11.2", "unit": "g/dL", "status": "low"},
+            {"name": "Creatinine", "value": "2.1", "unit": "mg/dL", "status": "high"},
+        ],
+        "warning_signs": [{"text": "Weight gain over 2 kg in 3 days", "source_page": 1}],
+    }
+    text = "[Page 1]\nDiagnosis: Heart failure\nHb 11.2 g/dL\nDischarge medication: Tab. Furosemide 40mg OD"
+    with patch("app.llm.client._chat", return_value=json.dumps(mock_payload)):
+        card = llm.extract_discharge_card(text)
+    assert [m["name"] for m in card["medicines"]] == ["Tab Furosemide"]
+    assert [lab["name"] for lab in card["lab_values"]] == ["Hb"]
+    assert card["summary"].startswith("Admitted")
+    assert card["warning_signs"][0]["text"].startswith("Weight gain")
 
 
 def test_extract_bill_reconciliation_math():
@@ -146,7 +170,7 @@ def test_extract_prescription():
     }
 
     with patch("app.llm.client._chat", return_value=json.dumps(mock_payload)):
-        result = llm.extract_prescription("Prescription text...")
+        result = llm.extract_prescription("Rx: Tab Metoprolol Succinate 25 mg once daily x 30 days")
         assert result["doctor_name"] == "Dr. Sharma"
         assert len(result["medicines"]) == 1
         assert result["medicines"][0]["medicine_name"] == "Metoprolol Succinate"
@@ -193,7 +217,7 @@ def test_extract_policy():
     with patch("app.llm.client._chat", return_value=json.dumps(mock_payload)):
         result = llm.extract_policy("Insurance policy text...")
         assert result["insurer"] == "Star Health"
-        assert result["sum_insured"] == "500000"
+        assert result["sum_insured"] == 500000.0
         assert len(result["exclusions"]) == 1
 
 
@@ -217,15 +241,15 @@ def test_qa_grounded_answer():
 # ==================== ROUTE & API TESTS ====================
 
 def test_upload_file_validation_oversized(client: TestClient, test_case: Case):
-    # Oversized file (> 15MB)
-    huge_bytes = b"x" * (16 * 1024 * 1024)
-    response = client.post(
-        f"/cases/{test_case.id}/documents",
-        data={"doc_type": "discharge_summary"},
-        files={"file": ("huge.pdf", huge_bytes, "application/pdf")},
-    )
+    huge_bytes = b"x" * (2 * 1024 * 1024)
+    with patch.object(settings, "upload_max_size_bytes", 1024 * 1024):
+        response = client.post(
+            f"/cases/{test_case.id}/documents",
+            data={"doc_type": "discharge_summary"},
+            files={"file": ("huge.pdf", huge_bytes, "application/pdf")},
+        )
     assert response.status_code == 413
-    assert "File exceeds" in response.json()["detail"]
+    assert "exceeds the maximum upload size" in response.json()["detail"]
 
 
 def test_upload_file_validation_empty(client: TestClient, test_case: Case):
@@ -294,7 +318,7 @@ def test_end_to_end_discharge_card_flow(client: TestClient, test_case: Case, ses
             files={"file": ("report.pdf", b"%PDF-1.4 dummy discharge summary", "application/pdf")},
         )
     assert resp.status_code == 202
-    doc_id = resp.json()["id"]
+    doc_id = resp.json()["documents"][0]["id"]
 
     # Process document using test session
     with patch("app.llm.client._chat", return_value=json.dumps(mock_card)), \
@@ -335,7 +359,7 @@ def test_end_to_end_bill_flow(client: TestClient, test_case: Case, session: Sess
             files={"file": ("bill.pdf", b"%PDF-1.4 dummy bill content", "application/pdf")},
         )
     assert resp.status_code == 202
-    doc_id = resp.json()["id"]
+    doc_id = resp.json()["documents"][0]["id"]
 
     with patch("app.llm.client._chat", return_value=json.dumps(mock_bill)), \
          patch.object(settings, "groq_api_key", "test-key-123"):

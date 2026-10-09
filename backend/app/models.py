@@ -4,21 +4,16 @@ from typing import Optional
 from sqlalchemy import JSON, Column
 from sqlmodel import Field, SQLModel
 
-DOC_TYPES = [
-    "discharge_summary",
-    "investigation_report",
-    "hospital_bill",
-    "pharmacy_bill",
-    "lab_bill",
-    "insurance_policy",
-    "unknown",
-    # legacy aliases:
-    "lab_report",
-    "prescription",
-    "bill",
-    "id_proof",
-    "policy",
-]
+DOC_TYPES = ["discharge_summary", "lab_report", "prescription", "bill", "id_proof", "policy"]
+
+# Names the extraction pipeline and older app builds use, mapped to the upload categories above.
+DOC_TYPE_ALIASES = {
+    "investigation_report": "lab_report",
+    "hospital_bill": "bill",
+    "pharmacy_bill": "bill",
+    "lab_bill": "bill",
+    "insurance_policy": "policy",
+}
 
 
 def now() -> datetime:
@@ -113,6 +108,25 @@ class BillItem(SQLModel, table=True):
     worth_asking: bool = False
     ask_reason: Optional[str] = None
     concept: Optional[str] = None  # shared key for smart linking, e.g. "kidney_function"
+
+
+class PolicySummary(SQLModel, table=True):
+    """Terms read from an uploaded insurance policy: sum insured, limits, co-pay, exclusions."""
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    case_id: int = Field(foreign_key="case.id", index=True)
+    document_id: int = Field(foreign_key="document.id")
+    data: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    created_at: datetime = Field(default_factory=now)
+
+
+class CoverageReport(SQLModel, table=True):
+    """Which bill items the policy is likely to pay, with reasons. Recomputed when a bill or policy is added."""
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    case_id: int = Field(foreign_key="case.id", index=True)
+    data: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    created_at: datetime = Field(default_factory=now)
 
 
 class Claim(SQLModel, table=True):

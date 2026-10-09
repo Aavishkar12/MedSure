@@ -11,10 +11,8 @@ from app.db import init_db
 from app.config import settings
 
 
-@pytest.fixture(scope="session", autouse=True)
-def setup_test_db(tmp_path_factory):
-    test_dir = tmp_path_factory.mktemp("test_extractions")
-    settings.extractions_dir = str(test_dir)
+@pytest.fixture(scope="module", autouse=True)
+def setup_test_db():
     settings.auth_dev_bypass = True
     init_db()
 
@@ -185,9 +183,11 @@ def test_ocr_path_with_image():
     job_id = upload_res.json()["job_id"]
     doc_id = upload_res.json()["documents"][0]["id"]
 
-    # Poll status
+    # A blank picture has nothing to read: the job finishes and reports the document as failed.
     job_status = client.get(f"/jobs/{job_id}", headers=headers).json()
-    assert job_status["stage"] == "completed"
+    assert job_status["stage"] == "failed"
+    doc = client.get(f"/documents/{doc_id}", headers=headers).json()
+    assert doc["status"] == "failed" and doc["error"]
 
     # Verify extraction record
     ext = client.get(f"/cases/{case_id}/extractions/{doc_id}", headers=headers).json()
@@ -208,7 +208,7 @@ def test_invalid_file_extension_rejected():
         headers=headers,
     )
     assert res.status_code == 400
-    assert "Unsupported file extension" in res.json()["detail"]
+    assert "Unsupported file type" in res.json()["detail"]
 
 
 def test_demo_fallback_behavior():

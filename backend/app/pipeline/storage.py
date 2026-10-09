@@ -101,7 +101,7 @@ def update_case_merged_extraction(case_id: str | int) -> CaseExtractionEnvelope:
 def find_cached_extraction_by_hash(file_hash: str) -> Optional[Dict[str, Any]]:
     """
     Searches extractions across all cases for an extraction matching file_hash.
-    Returns the extraction dictionary if found, or None.
+    Returns the extraction dictionary, with the document's text under "raw_text", or None.
     """
     base_dir = get_extractions_base_dir()
     for case_folder in base_dir.iterdir():
@@ -112,8 +112,11 @@ def find_cached_extraction_by_hash(file_hash: str) -> Optional[Dict[str, Any]]:
                 continue
             try:
                 data = json.loads(json_file.read_text(encoding="utf-8"))
-                if data.get("file_hash") == file_hash and not data.get("is_demo_fallback"):
-                    return data
             except Exception:
                 continue
+            # Demo data must never be served as a real reading of a document.
+            if data.get("file_hash") == file_hash and data.get("extraction_method") != "demo_fallback":
+                raw = case_folder / f"{json_file.stem}_raw.txt"
+                data["raw_text"] = raw.read_text(encoding="utf-8") if raw.exists() else ""
+                return data
     return None

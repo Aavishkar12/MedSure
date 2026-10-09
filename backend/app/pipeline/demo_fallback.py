@@ -5,7 +5,7 @@ ONLY when DEMO_FALLBACK=true and live extraction fails.
 OFF by default.
 """
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 # The six designated synthetic sample reference datasets
 SAMPLE_DISCHARGE_SUMMARY = {

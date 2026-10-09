@@ -1,26 +1,39 @@
 import logging
-from pathlib import Path
-from typing import Optional, Dict, Any, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from ..config import settings
-from .extractor import extract_document_text
 from .classifier import classify_document_text
+from .extractor import extract_document_text
 from .parsers import (
-    parse_discharge_summary,
-    parse_investigation_report,
     parse_bill,
+    parse_discharge_summary,
     parse_insurance_policy,
+    parse_investigation_report,
     parse_unknown,
 )
 from .schemas import DocumentExtractionEnvelope, utc_now_iso
 from .storage import (
-    save_raw_text,
-    save_document_extraction,
-    update_case_merged_extraction,
     find_cached_extraction_by_hash,
+    save_document_extraction,
+    save_raw_text,
+    update_case_merged_extraction,
 )
 
 logger = logging.getLogger("medsure.pipeline")
+
+# Upload categories the app sends -> the parser to try when the text alone does not say what it is.
+# A prescription has no parser of its own; it is read by the LLM only.
+HINT_TO_PIPELINE_TYPE = {
+    "discharge_summary": "discharge_summary",
+    "lab_report": "investigation_report",
+    "investigation_report": "investigation_report",
+    "bill": "hospital_bill",
+    "hospital_bill": "hospital_bill",
+    "pharmacy_bill": "pharmacy_bill",
+    "lab_bill": "lab_bill",
+    "policy": "insurance_policy",
+    "insurance_policy": "insurance_policy",
+}
 
 
 def run_pipeline_for_document(
@@ -30,22 +43,21 @@ def run_pipeline_for_document(
     file_hash: str,
     source_filename: str,
     hint_doc_type: Optional[str] = None,
-) -> DocumentExtractionEnvelope:
+    supplied_text: Optional[str] = None,
+) -> Tuple[DocumentExtractionEnvelope, str]:
     """
-    Executes the full real extraction pipeline:
-    Uploaded document -> Text extraction (OCR when needed) -> Document classification -> Parsing -> Validation -> Structured JSON output.
-    Does NOT use any LLM.
+    Uploaded document -> text (text layer, phone OCR or Tesseract) -> classification -> rule-based parsing.
+    Saves the structured JSON and returns it with the full page-marked text. Does not use any LLM.
     """
     case_str = str(case_id)
     doc_str = str(doc_id)
     warnings = []
 
-    # 1. Check SHA-256 cache
+    # 1. Same file seen before: reuse its text and parse.
     cached = find_cached_extraction_by_hash(file_hash)
     if cached:
         logger.info(f"Reusing cached extraction for hash {file_hash[:8]} on case {case_str} doc {doc_str}")
-        cached_envelope = DocumentExtractionEnvelope(
-            schema_version="1.0.0",
+        envelope = DocumentExtractionEnvelope(
             doc_id=doc_str,
             case_id=case_str,
             source_file=source_filename,
@@ -59,92 +71,55 @@ def run_pipeline_for_document(
             extracted_at=utc_now_iso(),
             fields=cached.get("fields", {}),
         )
-        save_document_extraction(cached_envelope)
+        text = cached.get("raw_text", "")
+        save_raw_text(case_str, doc_str, text)
+        save_document_extraction(envelope)
         update_case_merged_extraction(case_str)
-        return cached_envelope
+        return envelope, text
 
-    # 2. Text Extraction
-    text_result = extract_document_text(file_path)
+    # 2. Text extraction
+    text_result = extract_document_text(file_path, supplied_text)
     warnings.extend(text_result.warnings)
-
-    # Save raw text separately
     save_raw_text(case_str, doc_str, text_result.full_text)
 
-    # 3. Deterministic Classification
-    classified_type, class_conf = classify_document_text(text_result.full_text)
+    # 3. Deterministic classification, falling back to the category the user uploaded it under
+    final_type, class_conf = classify_document_text(text_result.full_text)
+    if final_type == "unknown" and hint_doc_type in HINT_TO_PIPELINE_TYPE and text_result.full_text:
+        final_type = HINT_TO_PIPELINE_TYPE[hint_doc_type]
+        class_conf = 0.60
+        warnings.append(f"Classification defaulted to upload category '{hint_doc_type}'.")
 
-    # Map legacy or hint types if classification is indeterminate
-    final_type = classified_type
-    if final_type == "unknown" and hint_doc_type and hint_doc_type != "unknown":
-        type_mapping = {
-            "discharge_summary": "discharge_summary",
-            "lab_report": "investigation_report",
-            "prescription": "pharmacy_bill",
-            "bill": "hospital_bill",
-            "policy": "insurance_policy",
-            "investigation_report": "investigation_report",
-            "hospital_bill": "hospital_bill",
-            "pharmacy_bill": "pharmacy_bill",
-            "lab_bill": "lab_bill",
-            "insurance_policy": "insurance_policy",
-        }
-        mapped = type_mapping.get(hint_doc_type)
-        if mapped:
-            final_type = mapped
-            class_conf = 0.60
-            warnings.append(f"Classification defaulted to upload category '{hint_doc_type}'.")
-
-    # 4. Parsing based on classified document type
-    fields_dict: Dict[str, Any] = {}
-    parser_warnings = []
-
+    # 4. Rule-based parsing for the classified type
+    text = text_result.full_text
     if final_type == "discharge_summary":
-        parsed_fields, p_warns = parse_discharge_summary(text_result.full_text)
-        fields_dict = parsed_fields.model_dump()
-        parser_warnings.extend(p_warns)
-
+        parsed, p_warns = parse_discharge_summary(text)
     elif final_type == "investigation_report":
-        parsed_fields, p_warns = parse_investigation_report(text_result.full_text)
-        fields_dict = parsed_fields.model_dump()
-        parser_warnings.extend(p_warns)
-
+        parsed, p_warns = parse_investigation_report(text)
     elif final_type in ("hospital_bill", "pharmacy_bill", "lab_bill"):
-        parsed_fields, p_warns = parse_bill(text_result.full_text, bill_subtype=final_type)
-        fields_dict = parsed_fields.model_dump()
-        parser_warnings.extend(p_warns)
-
+        parsed, p_warns = parse_bill(text, bill_subtype=final_type)
     elif final_type == "insurance_policy":
-        parsed_fields, p_warns = parse_insurance_policy(text_result.full_text)
-        fields_dict = parsed_fields.model_dump()
-        parser_warnings.extend(p_warns)
-
+        parsed, p_warns = parse_insurance_policy(text)
     else:
         final_type = "unknown"
-        parsed_fields, p_warns = parse_unknown(text_result.full_text)
-        fields_dict = parsed_fields.model_dump()
-        parser_warnings.extend(p_warns)
+        parsed, p_warns = parse_unknown(text)
+    fields_dict: Dict[str, Any] = parsed.model_dump()
+    warnings.extend(p_warns)
 
-    warnings.extend(parser_warnings)
-
-    # 4b. Optional Demo Fallback for the 6 synthetic samples (OFF by default)
-    is_demo_fallback = False
-    if settings.demo_fallback and (final_type == "unknown" or not fields_dict):
+    # 4b. Optional demo fallback for the six synthetic samples (OFF by default). Never cached.
+    method, confidence = text_result.primary_method, text_result.confidence
+    if settings.demo_fallback and final_type == "unknown":
         from .demo_fallback import get_demo_fallback_extraction
+
         fb = get_demo_fallback_extraction(source_filename)
         if fb:
-            fb_type, fb_fields = fb
             logger.warning(f"DEMO_FALLBACK used for document {source_filename} on case {case_str}")
-            final_type = fb_type
-            fields_dict = fb_fields
-            class_conf = 1.0
-            is_demo_fallback = True
-            text_result.primary_method = "demo_fallback"
-            text_result.confidence = 1.0
-            warnings.append("DEMO_FALLBACK enabled: extraction failed or incomplete; returned synthetic sample reference data for demonstration.")
+            final_type, fields_dict = fb
+            class_conf, method, confidence = 1.0, "demo_fallback", 1.0
+            warnings.append(
+                "DEMO_FALLBACK enabled: extraction failed or incomplete; returned synthetic sample reference data for demonstration."
+            )
 
-    # 5. Assemble common envelope
     envelope = DocumentExtractionEnvelope(
-        schema_version="1.0.0",
         doc_id=doc_str,
         case_id=case_str,
         source_file=source_filename,
@@ -152,15 +127,12 @@ def run_pipeline_for_document(
         doc_type=final_type,
         classification_confidence=class_conf,
         pages=text_result.page_count,
-        extraction_method=text_result.primary_method,
-        extraction_confidence=text_result.confidence,
+        extraction_method=method,
+        extraction_confidence=confidence,
         warnings=warnings,
         extracted_at=utc_now_iso(),
         fields=fields_dict,
     )
-
-    # 6. Save document JSON & update merged case extraction
     save_document_extraction(envelope)
     update_case_merged_extraction(case_str)
-
-    return envelope
+    return envelope, text
