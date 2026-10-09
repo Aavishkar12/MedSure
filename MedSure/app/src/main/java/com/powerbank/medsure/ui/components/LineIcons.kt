@@ -117,5 +117,8 @@ object LineIcons {
     val Paperclip by lazy {
         icon("paperclip", "M21.44 11.05 L12.25 20.24 A6 6 0 0 1 3.76 11.75 L12.95 2.56 A4 4 0 0 1 18.61 8.22 L9.41 17.41 A2 2 0 0 1 6.58 14.58 L15.07 6.1")
     }
+    val Phone by lazy { icon("phone", "M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z") }
+    val ArrowLeft by lazy { icon("arrow-left", "M19 12H5", "M12 19l-7-7 7-7") }
+    val Calendar by lazy { icon("calendar", "M8 7V3", "M16 7V3", "M7 11h10", "M5 21h14a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2z") }
+    val FileAlt by lazy { FileText }
 }
-

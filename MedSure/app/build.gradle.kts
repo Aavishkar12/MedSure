@@ -4,7 +4,7 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
-    id("com.google.gms.google-services")
+    // id("com.google.gms.google-services") // Commented out because google-services.json is missing
 }
 
 // Backend addresses, comma separated; the app uses the first one that answers.
@@ -26,6 +26,9 @@ android {
         versionCode = 1
         versionName = "0.1.0"
         buildConfigField("String", "API_URL", "\"${apiUrl.trimEnd('/')}\"")
+        
+        val mapsKey = localProps.getProperty("maps.apiKey") ?: ""
+        manifestPlaceholders["MAPS_API_KEY"] = mapsKey
     }
 
     buildTypes {
@@ -61,6 +64,11 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.ui:ui-tooling-preview")
     debugImplementation("androidx.compose.ui:ui-tooling")
+    // Google Maps and Places
+    implementation("com.google.maps.android:maps-compose:5.0.0")
+    implementation("com.google.android.gms:play-services-location:21.3.0")
+    implementation("com.google.android.libraries.places:places:3.5.0")
+    
 
     implementation(platform("com.google.firebase:firebase-bom:33.7.0"))
     implementation("com.google.firebase:firebase-auth")

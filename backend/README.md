@@ -37,15 +37,38 @@ After sign-in the app calls `PATCH /me` with the sign-up details (`name`, `phone
   as `pending` and join automatically when they sign in with that phone or email.
 - `can_approve: false` makes a member view-only: they cannot approve drafts.
 
+## AI Document Understanding & Q&A
+
+MedSure integrates server-side Groq LLMs (`GROQ_API_KEY`) to extract structured clinical and billing data from medical documents and ground user Q&A:
+- **Discharge Summaries:** Clinical diagnosis, medications (dosage, schedule, purpose, warnings), lab values with reference ranges, precautions/red flags, and follow-up schedules.
+- **Hospital Bills:** Line items, descriptions, quantities, unit prices, arithmetic reconciliation against stated subtotal/discounts/tax/total, and billing review flags.
+- **Prescriptions:** Prescribed medications, dosage instructions, duration, safety confirmation flags.
+- **Lab Reports:** Test panels, units, reference intervals, high/low abnormality status flags.
+- **Insurance Policies:** Policy details, coverage limits, copay, exclusions, preauth clauses.
+- **Grounded Q&A (`POST /cases/{case_id}/ask`):** Answering user questions grounded strictly in their uploaded case documents with source document, page, and exact quotes.
+
+## Running Tests
+
+Run the automated backend test suite:
+```bash
+python -m pytest tests/test_llm_documents.py -v
+```
+
+## Connecting Android Emulator or Physical Device
+
+- **Android Emulator:** Set `API_URL = "http://10.0.2.2:8000"` in `local.properties` or build config.
+- **Physical Device:** Ensure the phone and PC are on the same Wi-Fi network and set `API_URL = "http://<PC_LOCAL_IP>:8000"`.
+
 ## Layout
 
 | Path | What |
 |---|---|
-| `app/routers/` | Endpoints: cases, documents, claims + drafts, check-ins, devices |
-| `app/models.py` | Database tables. Shared file: say so before changing it |
-| `app/llm/` | Groq client, prompts and extraction schemas |
+| `app/routers/` | Endpoints: cases, documents (`/cases/{id}/documents`, `/documents/{id}`, `/cases/{id}/ask`, `/discharge-card`, `/bill`), claims, check-ins, devices |
+| `app/models.py` | Database tables (Case, CaseMember, Document, DischargeCard, BillItem, User, etc.) |
+| `app/llm/` | Groq client, prompts, extraction schemas (discharge, bill, prescription, lab, policy), and document Q&A engine |
 | `app/rules.py` | Red-flag rule engine (deterministic, no LLM) |
 | `app/firebase.py`, `app/notify.py` | Token verification and push notifications |
+| `tests/` | Comprehensive test suite for LLM extraction, bill reconciliation, validations, and API routes |
 
 Tables are created on startup but never altered. After changing `models.py`:
 

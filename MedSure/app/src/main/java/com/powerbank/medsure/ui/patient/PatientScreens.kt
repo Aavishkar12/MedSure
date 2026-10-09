@@ -448,43 +448,8 @@ fun HelpScreen(vm: MedSureViewModel) {
                 fam?.let { placeCall(ctx, it.phone) }
             }
         }
-        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            filters.forEach { (id, label) -> Chip(label, vm.filter == id) { vm.filter = id } }
-        }
-        vm.places.forEach { p ->
-            val on = vm.chosen == p.id
-            MsCard(border = if (on) Ms.Ink else Ms.Line, gap = 12.dp) {
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Column(Modifier.weight(1f)) {
-                        T(p.name, 17, 700)
-                        T(p.meta, 14, 400, Ms.Muted)
-                    }
-                    D(p.dist, 20)
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    T(p.open, 13, 700, Ms.GreenFg, Modifier.clip(RoundedCornerShape(999.dp)).background(Ms.GreenBg).padding(horizontal = 10.dp, vertical = 4.dp))
-                    if (p.badge.isNotEmpty()) T(p.badge, 13, 700, Ms.Paper, Modifier.clip(RoundedCornerShape(999.dp)).background(Ms.Ink).padding(horizontal = 10.dp, vertical = 4.dp))
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    MsButton(t["call"], BtnKind.Light, Modifier.weight(1f), height = 44.dp) {}
-                    MsButton(if (on) t["going"] else t["goHere"], if (on) BtnKind.Primary else BtnKind.Mari, Modifier.weight(1f), height = 44.dp) {
-                        vm.chosen = if (on) null else p.id
-                    }
-                }
-            }
-        }
-        if (vm.chosen != null && vm.places.any { it.id == vm.chosen }) {
-            Column(
-                Modifier.fillMaxWidth().clip(RoundedCornerShape(22.dp)).background(Ms.Ink).padding(18.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    T(t["shareTitle"], 16, 700, Ms.Paper, Modifier.weight(1f))
-                    MsSwitch(vm.share, t["shareTitle"]) { vm.share = !vm.share }
-                }
-                T(if (vm.share) t["shareOnTxt"] else t["shareOffTxt"], 14, 400, Ms.OnDark, lh = 1.5f)
-            }
-        }
+        // Show NearbyCare map and places list
+        NearbyCareScreen(vm)
     }
 }
 
