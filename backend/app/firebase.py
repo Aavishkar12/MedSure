@@ -3,14 +3,22 @@
 import json
 from functools import lru_cache
 
-import firebase_admin
-from firebase_admin import auth, credentials, messaging
+try:
+    import firebase_admin
+    from firebase_admin import auth, credentials, messaging
+except ImportError:
+    firebase_admin = None
+    auth = None
+    credentials = None
+    messaging = None
 
 from .config import settings
 
 
 @lru_cache
 def _app():
+    if not firebase_admin:
+        return None
     raw = settings.firebase_credentials.strip()
     if not raw:
         return None

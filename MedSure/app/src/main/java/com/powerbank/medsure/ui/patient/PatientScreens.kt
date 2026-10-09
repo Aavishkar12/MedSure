@@ -10,6 +10,8 @@ import androidx.compose.animation.core.*
 import androidx.compose.runtime.getValue
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.border
 import androidx.compose.foundation.horizontalScroll
@@ -92,7 +94,14 @@ fun TodayScreen(vm: MedSureViewModel) {
     val t = vm.tx
     val doses = vm.doses
     Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
-        Column(Modifier.padding(top = 6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+        Column(
+            Modifier.padding(top = 6.dp).combinedClickable(
+                onLongClick = { vm.showExtractionDebug = true },
+                onClick = { /* No-op, preserves normal touch */ },
+            ),
+            verticalArrangement = Arrangement.spacedBy(2.dp)
+        ) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 T(t["date"], 14, 600, Ms.Muted); Dot(); T(t["dayHome"], 14, 600, Ms.Muted)
             }

@@ -165,6 +165,16 @@ class MedSureViewModel : ViewModel() {
     var onbInsDoc by mutableStateOf<UploadedDoc?>(null)
     val onbFamilyMembers = mutableStateListOf<OnboardingFamilyMember>()
 
+    // Real document extraction processing states
+    var processingError by mutableStateOf<String?>(null)
+    var processingJobId by mutableStateOf<String?>(null)
+    var processingActiveStep by mutableIntStateOf(0)
+    var processingCompletedSteps by mutableIntStateOf(0)
+    var processingTargetProgress by mutableFloatStateOf(0.08f)
+    var processingCompletedPills by mutableIntStateOf(0)
+    var extractedData by mutableStateOf<org.json.JSONObject?>(null)
+    var showExtractionDebug by mutableStateOf(false)
+
     val onbStep1Valid: Boolean
         get() = onbFullName.trim().isNotEmpty() &&
                 (onbAge.toIntOrNull()?.let { it in 1..120 } == true) &&
@@ -193,6 +203,120 @@ class MedSureViewModel : ViewModel() {
         ptab = PTab.Today
         ftab = FTab.Home
         saveOnboarding()
+    }
+
+    fun startProcessing(context: android.content.Context) {
+        processingError = null
+        val allDocs = (onbReports + onbBills + listOfNotNull(onbInsDoc)).toList()
+        viewModelScope.launch {
+            val startTime = System.currentTimeMillis()
+            val minDisplayMs = 3500L
+
+            try {
+                // Step 1: Securing your documents (uploading & preparing)
+                processingActiveStep = 0
+                processingTargetProgress = 0.25f
+                processingCompletedPills = 1
+
+                // Ensure user profile & case exist on backend
+                val name = onbFullName.trim().ifEmpty { me }
+                runCatching { Backend.signIn() }
+                runCatching { Backend.saveProfile(name, phone, email) }
+                val id = caseId ?: Backend.firstCaseId() ?: Backend.createCase(name, "self")
+                caseId = id
+
+                // Save onboarding helpers
+                val helpers = onbFamilyMembers.toList()
+                helpers.forEach { h ->
+                    if (members.none { it.name == h.name && it.phone == h.phone }) {
+                        members.add(Member(h.name, "other", if (h.canApprove) "approve" else "view", false, normalizePhone(h.phone)))
+                    }
+                    runCatching { Backend.addMember(id, h.name, "family", h.canApprove, h.phone, "") }
+                }
+                runCatching { Backend.registerDevice() }
+
+                if (allDocs.isNotEmpty()) {
+                    // Real multipart document upload
+                    val jobId = Backend.uploadDocuments(context, id, allDocs)
+                    processingJobId = jobId
+                    processingCompletedSteps = 1
+                    processingCompletedPills = 2
+
+                    // Step 2: Reading your discharge papers (extracting & classifying)
+                    processingActiveStep = 1
+                    processingTargetProgress = 0.50f
+
+                    var isDone = false
+                    var pollCount = 0
+                    while (!isDone && pollCount < 40) {
+                        delay(600)
+                        pollCount++
+                        val jobJson = Backend.getJobStatus(jobId)
+                        val stageStr = jobJson.optString("stage", "")
+                        val prog = jobJson.optDouble("progress", 0.5).toFloat()
+
+                        if (stageStr == "extracting" || stageStr == "classifying") {
+                            processingActiveStep = 1
+                            processingTargetProgress = 0.50f.coerceAtLeast(prog)
+                        } else if (stageStr == "parsing" || stageStr == "validating") {
+                            processingCompletedSteps = 2
+                            processingActiveStep = 2
+                            processingTargetProgress = 0.75f.coerceAtLeast(prog)
+                            processingCompletedPills = 3
+                        } else if (stageStr == "completed") {
+                            processingCompletedSteps = 3
+                            processingActiveStep = 3
+                            processingTargetProgress = 1.0f
+                            processingCompletedPills = 4
+                            isDone = true
+                        } else if (stageStr == "failed") {
+                            val err = jobJson.optString("error", "Document processing encountered an issue on server")
+                            throw java.io.IOException(err)
+                        }
+                    }
+
+                    // Retrieve extracted data for inspection
+                    runCatching {
+                        extractedData = Backend.getCaseExtractions(id)
+                    }
+                } else {
+                    // When no documents were attached, proceed through the minimum display steps
+                    delay(800)
+                    processingCompletedSteps = 1
+                    processingActiveStep = 1
+                    processingTargetProgress = 0.50f
+                    processingCompletedPills = 2
+                    delay(800)
+                    processingCompletedSteps = 2
+                    processingActiveStep = 2
+                    processingTargetProgress = 0.75f
+                    processingCompletedPills = 3
+                    delay(800)
+                }
+
+                // Step 4: Preparing your home screen
+                processingCompletedSteps = 4
+                processingActiveStep = 3
+                processingTargetProgress = 1.0f
+                processingCompletedPills = 5
+
+                // Enforce minimum display duration so screen transitions smoothly
+                val elapsed = System.currentTimeMillis() - startTime
+                if (elapsed < minDisplayMs) {
+                    delay(minDisplayMs - elapsed)
+                }
+                delay(400)
+
+                // Navigate to Patient Home without changing existing dummy values
+                stage = Stage.App
+                overlay = null
+                ptab = PTab.Today
+                ftab = FTab.Home
+            } catch (e: Exception) {
+                Log.e("MedSure", "Document pipeline processing failed", e)
+                processingError = e.message ?: "Failed to connect to backend server"
+            }
+        }
     }
 
     fun verify() {

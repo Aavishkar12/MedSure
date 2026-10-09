@@ -4,7 +4,12 @@ import base64
 import json
 from pathlib import Path
 
-from groq import APIError, Groq, RateLimitError
+try:
+    from groq import APIError, Groq, RateLimitError
+except ImportError:
+    APIError = Exception
+    RateLimitError = Exception
+    Groq = None
 
 from ..config import settings
 

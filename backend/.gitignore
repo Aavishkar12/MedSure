@@ -4,6 +4,7 @@ __pycache__/
 *.pyc
 *.db
 uploads/
+data/
 # Firebase service account keys
 *service-account*.json
 *firebase-adminsdk*.json

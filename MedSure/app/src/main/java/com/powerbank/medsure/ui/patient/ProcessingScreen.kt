@@ -23,12 +23,8 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.powerbank.medsure.state.MedSureViewModel
-import com.powerbank.medsure.ui.components.D
-import com.powerbank.medsure.ui.components.Ico
-import com.powerbank.medsure.ui.components.LineIcons
-import com.powerbank.medsure.ui.components.T
+import com.powerbank.medsure.ui.components.*
 import com.powerbank.medsure.ui.theme.Ms
-import kotlinx.coroutines.delay
 
 /**
  * Premium loading & preparation screen.
@@ -55,50 +51,18 @@ fun ProcessingScreen(vm: MedSureViewModel) {
         }
     }
 
-    // Processing animation states
-    var completedPills by remember { mutableIntStateOf(0) }
-    var activeStep by remember { mutableIntStateOf(0) }
-    var completedSteps by remember { mutableIntStateOf(0) }
-    var targetProgress by remember { mutableFloatStateOf(0.08f) }
+    // Real processing state from ViewModel
+    val completedPills = vm.processingCompletedPills
+    val activeStep = vm.processingActiveStep
+    val completedSteps = vm.processingCompletedSteps
+    val targetProgress = vm.processingTargetProgress
+    val error = vm.processingError
 
-    // Simulated for demo. No real processing happens.
+    // Trigger real backend pipeline
     LaunchedEffect(Unit) {
-        // Step 1: Securing your documents (0ms - 1100ms)
-        activeStep = 0
-        targetProgress = 0.28f
-        delay(650)
-        completedPills = 1
-        delay(450)
-        completedSteps = 1
-
-        // Step 2: Reading your discharge papers (1100ms - 2200ms)
-        activeStep = 1
-        targetProgress = 0.52f
-        delay(400)
-        completedPills = 2
-        delay(700)
-        completedSteps = 2
-
-        // Step 3: Setting up your medicine reminders (2200ms - 3300ms)
-        activeStep = 2
-        targetProgress = 0.76f
-        delay(300)
-        completedPills = 3
-        delay(800)
-        completedSteps = 3
-
-        // Step 4: Preparing your home screen (3300ms - 4400ms)
-        activeStep = 3
-        targetProgress = 1.0f
-        delay(250)
-        completedPills = 4
-        delay(850)
-        completedSteps = 4
-        completedPills = 5
-
-        // Hold for 400ms upon final completion, then navigate to Patient Home
-        delay(400)
-        vm.completeProcessing()
+        if (error == null) {
+            vm.startProcessing(context)
+        }
     }
 
     val progress by animateFloatAsState(
@@ -167,6 +131,35 @@ fun ProcessingScreen(vm: MedSureViewModel) {
                     isActive = isActive,
                     reduceMotion = reduceMotion,
                 )
+            }
+        }
+
+        // Error notification card with Retry & Skip actions
+        if (error != null) {
+            Column(
+                Modifier.fillMaxWidth()
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(Ms.White)
+                    .border(1.dp, Ms.Line, RoundedCornerShape(20.dp))
+                    .padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Tick(40.dp, Ms.Red) { Ico(LineIcons.AlertCircle, Ms.Paper, 20.dp) }
+                    Column(Modifier.weight(1f)) {
+                        D("Upload issue", 18)
+                        T("Couldn't finish document extraction", 13, 400, Ms.Muted)
+                    }
+                }
+                T(error.take(140), 13, 400, Ms.Text3)
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    MsButton("Retry", BtnKind.Primary, Modifier.weight(1f)) {
+                        vm.startProcessing(context)
+                    }
+                    MsButton("Skip to Home", BtnKind.Light, Modifier.weight(1f)) {
+                        vm.completeProcessing()
+                    }
+                }
             }
         }
 

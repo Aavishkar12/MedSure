@@ -4,7 +4,21 @@ from typing import Optional
 from sqlalchemy import JSON, Column
 from sqlmodel import Field, SQLModel
 
-DOC_TYPES = ["discharge_summary", "lab_report", "prescription", "bill", "id_proof", "policy"]
+DOC_TYPES = [
+    "discharge_summary",
+    "investigation_report",
+    "hospital_bill",
+    "pharmacy_bill",
+    "lab_bill",
+    "insurance_policy",
+    "unknown",
+    # legacy aliases:
+    "lab_report",
+    "prescription",
+    "bill",
+    "id_proof",
+    "policy",
+]
 
 
 def now() -> datetime:
@@ -64,6 +78,20 @@ class Document(SQLModel, table=True):
     status: str = "processing"  # processing | ready | failed
     error: Optional[str] = None
     created_at: datetime = Field(default_factory=now)
+
+
+class ProcessingJob(SQLModel, table=True):
+    id: str = Field(primary_key=True)  # UUID hex
+    case_id: int = Field(foreign_key="case.id", index=True)
+    stage: str = "uploading"  # uploading | extracting | classifying | parsing | validating | completed | failed
+    progress: float = 0.0  # 0.0 to 1.0
+    total_files: int = 1
+    processed_files: int = 0
+    files: list = Field(default_factory=list, sa_column=Column(JSON))
+    warnings: list = Field(default_factory=list, sa_column=Column(JSON))
+    error: Optional[str] = None
+    created_at: datetime = Field(default_factory=now)
+    completed_at: Optional[datetime] = None
 
 
 class DischargeCard(SQLModel, table=True):
