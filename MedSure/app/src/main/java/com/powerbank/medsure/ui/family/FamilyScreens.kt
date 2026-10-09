@@ -18,6 +18,7 @@ import com.powerbank.medsure.state.FTab
 import com.powerbank.medsure.state.MedSureViewModel
 import com.powerbank.medsure.state.Sheet
 import com.powerbank.medsure.ui.components.*
+import com.powerbank.medsure.ui.patient.*
 import com.powerbank.medsure.ui.theme.Ms
 
 // ====================== HOME ======================
@@ -58,9 +59,12 @@ fun FamilyHomeScreen(vm: MedSureViewModel) {
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.height(IntrinsicSize.Min)) {
             MsCard(Modifier.weight(1f).fillMaxHeight(), gap = 4.dp, onClick = { vm.ftab = FTab.Meds }) {
                 T(t["medsCap"], 12, 800, Ms.Muted)
-                D("${vm.takenCount}/4", 34)
+                val total = vm.doses.size
+                D("${vm.takenCount}/$total", 34)
                 Box(Modifier.fillMaxWidth().height(8.dp).clip(RoundedCornerShape(999.dp)).background(Ms.Blister)) {
-                    Box(Modifier.fillMaxWidth(vm.takenCount / 4f).height(8.dp).clip(RoundedCornerShape(999.dp)).background(Ms.Teal))
+                    if (total > 0 && vm.takenCount > 0) {
+                        Box(Modifier.fillMaxWidth(vm.takenCount.toFloat() / total).height(8.dp).clip(RoundedCornerShape(999.dp)).background(Ms.Teal))
+                    }
                 }
             }
             MsCard(
@@ -106,7 +110,8 @@ fun FamilyMedsScreen(vm: MedSureViewModel) {
             D(t["fmTitle"], 32)
             T(t["fmSub"], 14, 400, Ms.Muted, Modifier.padding(top = 6.dp), lh = 1.45f)
         }
-        when (vm.medChange) {
+        SampleBanner(vm)
+        if (vm.showingSample) when (vm.medChange) {
             "pending" -> Column(
                 Modifier.fillMaxWidth().clip(RoundedCornerShape(22.dp)).background(Ms.FlagBg)
                     .dashedBorder(Ms.FlagBorder, 1.5.dp, 22.dp).padding(18.dp),
@@ -128,6 +133,7 @@ fun FamilyMedsScreen(vm: MedSureViewModel) {
         }
         D(t["todayDoses"], 22)
         MsCard(gap = 14.dp) {
+            if (vm.doses.isEmpty()) EmptyNote(if (vm.dischargeCardData == null) t["noCard"] else t["noMeds"])
             vm.doses.forEach { d ->
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
                     Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -175,13 +181,21 @@ fun FamilyBillsScreen(vm: MedSureViewModel) {
             D(t["billTitle"], 32)
             T(t["billSub"], 14, 400, Ms.Muted, Modifier.padding(top = 6.dp))
         }
+        SampleBanner(vm)
+        if (!vm.showingSample && vm.billData == null) {
+            MsCard(gap = 12.dp) {
+                EmptyNote(t["noBill"])
+                AddPapersButton(vm, docType = "bill")
+            }
+            return@Column
+        }
         Column(Modifier.shadow(10.dp, RoundedCornerShape(20.dp), ambientColor = Ms.Ink.copy(alpha = 0.08f), spotColor = Ms.Ink.copy(alpha = 0.08f))) {
             Column(
                 Modifier.fillMaxWidth().clip(RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp)).background(Color.White)
                     .padding(start = 18.dp, end = 18.dp, top = 20.dp, bottom = 10.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                T("[HOSPITAL NAME] · IP [NUMBER]", 12, 800, Ms.Muted, spacing = 0.12f)
+                T(if (vm.showingSample) "[HOSPITAL NAME] · IP [NUMBER]" else vm.hospitalName.uppercase(), 12, 800, Ms.Muted, spacing = 0.12f)
                 vm.billRows.forEach { (label, amt) ->
                     Column {
                         Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.SpaceBetween) {
@@ -191,6 +205,7 @@ fun FamilyBillsScreen(vm: MedSureViewModel) {
                     }
                 }
                 Caps(t["worth"], Ms.AmberText, modifier = Modifier.padding(top = 6.dp))
+                if (vm.flags.isEmpty()) T(t["noFlags"], 14, 400, Ms.Muted)
                 vm.flags.forEach { f ->
                     val sentF = vm.sent[f.id] == true
                     Column(
@@ -216,8 +231,8 @@ fun FamilyBillsScreen(vm: MedSureViewModel) {
             }
             Zigzag()
         }
-        D(t["whoPaid"], 22)
-        MsCard(gap = 12.dp) {
+        if (vm.showingSample) D(t["whoPaid"], 22)
+        if (vm.showingSample) MsCard(gap = 12.dp) {
             Row(Modifier.fillMaxWidth().height(14.dp).clip(RoundedCornerShape(999.dp)), horizontalArrangement = Arrangement.spacedBy(3.dp)) {
                 Box(Modifier.weight(120000f).fillMaxHeight().background(Ms.Marigold))
                 Box(Modifier.weight(40000f).fillMaxHeight().background(Ms.Teal))
@@ -248,9 +263,13 @@ fun FamilyClaimScreen(vm: MedSureViewModel) {
     Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
         Column(Modifier.padding(top = 6.dp)) {
             D(t["claimTitle"], 32)
-            T(t["claimSub"], 14, 400, Ms.Muted, Modifier.padding(top = 6.dp))
+            val sub = if (vm.showingSample) t["claimSub"] else listOfNotNull(
+                vm.coverage?.insurer?.takeIf { it.isNotBlank() }, vm.coverage?.policyNumber?.takeIf { it.isNotBlank() },
+            ).joinToString(" · ")
+            if (sub.isNotBlank()) T(sub, 14, 400, Ms.Muted, Modifier.padding(top = 6.dp))
         }
-        Row(
+        SampleBanner(vm)
+        if (vm.showingSample) Row(
             Modifier.fillMaxWidth().clip(RoundedCornerShape(22.dp)).background(Ms.Ink).padding(18.dp),
             horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -279,6 +298,7 @@ fun FamilyClaimScreen(vm: MedSureViewModel) {
                 }
             }
         }
+        if (!vm.showingSample) CoverageSection(vm)
         D(t["docs"], 22)
         MsCard(gap = 12.dp) {
             vm.checklist.forEach { k ->
@@ -294,6 +314,7 @@ fun FamilyClaimScreen(vm: MedSureViewModel) {
                 }
             }
         }
+        if (!vm.showingSample && vm.missing > 0) AddPapersButton(vm)
         if (vm.approved) T(t["sentIns"], 15, 600, Ms.GreenFg, Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(Ms.GreenBg).padding(16.dp))
         else MsButton(t["review"], BtnKind.Primary, Modifier.fillMaxWidth()) { vm.sheet = Sheet.Approve }
     }

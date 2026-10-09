@@ -23,12 +23,8 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.powerbank.medsure.state.MedSureViewModel
-import com.powerbank.medsure.ui.components.D
-import com.powerbank.medsure.ui.components.Ico
-import com.powerbank.medsure.ui.components.LineIcons
-import com.powerbank.medsure.ui.components.T
+import com.powerbank.medsure.ui.components.*
 import com.powerbank.medsure.ui.theme.Ms
-import kotlinx.coroutines.delay
 
 /**
  * Premium loading & preparation screen.
@@ -55,47 +51,18 @@ fun ProcessingScreen(vm: MedSureViewModel) {
         }
     }
 
-    // Processing animation states
-    var completedPills by remember { mutableIntStateOf(0) }
-    var activeStep by remember { mutableIntStateOf(0) }
-    var completedSteps by remember { mutableIntStateOf(0) }
-    var targetProgress by remember { mutableFloatStateOf(0.08f) }
+    // Real processing state from ViewModel
+    val completedPills = vm.processingCompletedPills
+    val activeStep = vm.processingActiveStep
+    val completedSteps = vm.processingCompletedSteps
+    val targetProgress = vm.processingTargetProgress
+    val error = vm.processingError
 
-    // Real processing pipeline with visual progress synchronization
+    // Trigger real backend pipeline
     LaunchedEffect(Unit) {
-        // Step 1: Securing your profile
-        activeStep = 0
-        targetProgress = 0.25f
-        completedPills = 1
-
-        // Execute real backend upload & Groq LLM extraction pipeline
-        vm.processOnboardingDocs(context) { stepIdx ->
-            activeStep = stepIdx
-            when (stepIdx) {
-                1 -> {
-                    targetProgress = 0.50f
-                    completedPills = 2
-                    completedSteps = 1
-                }
-                2 -> {
-                    targetProgress = 0.75f
-                    completedPills = 3
-                    completedSteps = 2
-                }
-                3 -> {
-                    targetProgress = 0.95f
-                    completedPills = 4
-                    completedSteps = 3
-                }
-            }
+        if (error == null) {
+            vm.startProcessing(context)
         }
-
-        // Step 4: Final completion & navigate to app
-        targetProgress = 1.0f
-        completedPills = 5
-        completedSteps = 4
-        delay(400)
-        vm.completeProcessing()
     }
 
     val progress by animateFloatAsState(
@@ -132,14 +99,14 @@ fun ProcessingScreen(vm: MedSureViewModel) {
                 }
             }
 
-            // Headline & hardcoded Lakshmi greeting subtext
+            // Headline & greeting
             Column(
                 Modifier.fillMaxWidth().padding(top = 8.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 D("Setting things up for you", 30, lh = 1.15f)
-                T("Lakshmi, this takes just a moment.", 16, 400, Ms.Text3)
+                T("${vm.me}, we're reading your papers. This can take a minute.", 16, 400, Ms.Text3)
             }
         }
 
@@ -164,6 +131,35 @@ fun ProcessingScreen(vm: MedSureViewModel) {
                     isActive = isActive,
                     reduceMotion = reduceMotion,
                 )
+            }
+        }
+
+        // Error notification card with Retry & Skip actions
+        if (error != null) {
+            Column(
+                Modifier.fillMaxWidth()
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(Ms.White)
+                    .border(1.dp, Ms.Line, RoundedCornerShape(20.dp))
+                    .padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Tick(40.dp, Ms.Red) { Ico(LineIcons.AlertCircle, Ms.Paper, 20.dp) }
+                    Column(Modifier.weight(1f)) {
+                        D("Some papers need another look", 18)
+                        T("Try again, or continue and add them later", 13, 400, Ms.Muted)
+                    }
+                }
+                T(error.take(400), 13, 400, Ms.Text3)
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    MsButton("Retry", BtnKind.Primary, Modifier.weight(1f)) {
+                        vm.startProcessing(context)
+                    }
+                    MsButton("Continue", BtnKind.Light, Modifier.weight(1f)) {
+                        vm.completeProcessing()
+                    }
+                }
             }
         }
 

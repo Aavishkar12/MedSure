@@ -4,7 +4,14 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
-    // id("com.google.gms.google-services") // Commented out because google-services.json is missing
+}
+
+// Firebase needs app/google-services.json, which is shared privately (the repo is public).
+// Without it the app still builds, but sign-in and push will not work.
+if (file("google-services.json").exists()) {
+    apply(plugin = "com.google.gms.google-services")
+} else {
+    logger.warn("app/google-services.json is missing: Firebase sign-in and push are disabled in this build.")
 }
 
 // Backend addresses, comma separated; the app uses the first one that answers.
@@ -26,9 +33,9 @@ android {
         versionCode = 1
         versionName = "0.1.0"
         buildConfigField("String", "API_URL", "\"${apiUrl.trimEnd('/')}\"")
-        
-        val mapsKey = localProps.getProperty("maps.apiKey") ?: ""
-        manifestPlaceholders["MAPS_API_KEY"] = mapsKey
+        // Google Maps / Places key for the Help tab map: maps.apiKey=... in local.properties.
+        // Without it the Help tab lists places without a map.
+        manifestPlaceholders["MAPS_API_KEY"] = localProps.getProperty("maps.apiKey") ?: ""
     }
 
     buildTypes {
@@ -68,7 +75,6 @@ dependencies {
     implementation("com.google.maps.android:maps-compose:5.0.0")
     implementation("com.google.android.gms:play-services-location:21.3.0")
     implementation("com.google.android.libraries.places:places:3.5.0")
-    
 
     implementation(platform("com.google.firebase:firebase-bom:33.7.0"))
     implementation("com.google.firebase:firebase-auth")

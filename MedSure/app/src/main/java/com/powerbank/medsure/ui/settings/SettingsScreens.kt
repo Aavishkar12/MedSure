@@ -15,6 +15,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.powerbank.medsure.state.MedSureViewModel
+import com.powerbank.medsure.state.rupees
 import com.powerbank.medsure.state.Overlay
 import com.powerbank.medsure.ui.auth.LanguageGrid
 import com.powerbank.medsure.ui.components.*
@@ -230,7 +231,7 @@ fun SheetHeader(title: String, onClose: () -> Unit) {
 @Composable
 fun QuerySheetContent(vm: MedSureViewModel) {
     val t = vm.tx
-    val f = vm.flags.firstOrNull { it.id == vm.qid } ?: vm.flags.first()
+    val f = vm.flags.firstOrNull { it.id == vm.qid } ?: vm.flags.firstOrNull() ?: return
     val sent = vm.sent[f.id] == true
     SheetHeader(f.label) { vm.sheet = null }
     T("${t["whyFlag"]}${f.why}", 15, 400, Ms.Brown, Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(Ms.FlagBg).padding(14.dp), lh = 1.5f)
@@ -251,15 +252,25 @@ fun QuerySheetContent(vm: MedSureViewModel) {
 fun ApproveSheetContent(vm: MedSureViewModel) {
     val t = vm.tx
     SheetHeader(t["packet"]) { vm.sheet = null }
+    val cov = vm.coverage
     MsCard(gap = 10.dp) {
-        SheetRow(t["claimed"], "₹1,84,350")
-        SheetRow(t["notPayable"], "− ₹4,920")
-        SheetRow(t["docsAttached"], "${6 - vm.missing} ${t["ofSix"]}")
+        if (vm.showingSample) {
+            SheetRow(t["claimed"], "₹1,84,350")
+            SheetRow(t["notPayable"], "− ₹4,920")
+            SheetRow(t["docsAttached"], "${6 - vm.missing} ${t["ofSix"]}")
+        } else {
+            val billed = cov?.billed ?: vm.billData?.total ?: 0.0
+            SheetRow(t["claimed"], rupees(billed))
+            if (cov != null) SheetRow(t["covClaimable"], rupees(cov.estimatedClaimable))
+            val list = vm.checklist
+            SheetRow(t["docsAttached"], "${list.count { it.done }} / ${list.size}")
+        }
     }
     Caps(t["coverNote"], size = 12)
     MsCard {
         T(
-            "Cashless was declined on 24 Sep because documents were incomplete at admission. We are now claiming reimbursement for Lakshmi's stay from 24 to 29 Sep, with all reports, bills and the completed claim form attached.",
+            if (vm.showingSample) "Cashless was declined on 24 Sep because documents were incomplete at admission. We are now claiming reimbursement for Lakshmi's stay from 24 to 29 Sep, with all reports, bills and the completed claim form attached."
+            else listOfNotNull(cov?.headline, cov?.explanation?.takeIf { it.isNotBlank() }).joinToString("\n\n").ifBlank { t["covNeedBoth"] },
             15, 400, lh = 1.55f,
         )
     }

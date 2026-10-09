@@ -1,17 +1,17 @@
 package com.powerbank.medsure.net
 
 import android.content.Context
-import android.net.Uri
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.messaging.FirebaseMessaging
 import com.powerbank.medsure.BuildConfig
+import com.powerbank.medsure.state.DocumentInfoModel
+import com.powerbank.medsure.state.UploadedDoc
+import com.powerbank.medsure.state.parseDocuments
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.ByteArrayOutputStream
-import java.io.DataOutputStream
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
@@ -115,105 +115,94 @@ object Backend {
         return RemoteCheckin(last.getInt("id"), List(levels.length()) { levels.getInt(it) }, answers.optString("note"), last.getString("created_at"))
     }
 
-    // ==================== DOCUMENT & LLM API CALLS ====================
+    // ---------- Documents ----------
 
     /**
-     * Upload a document via multipart/form-data.
-     * Either context + uri OR ocrText must be provided.
+     * Uploads one document (multipart) and returns its id. The backend reads it in the background:
+     * poll [document] until its status is no longer "processing".
+     * docType: discharge_summary, lab_report, prescription, bill, policy, id_proof, or null to let the
+     * server decide from the text.
      */
-    suspend fun uploadDocument(
-        caseId: Int,
-        docType: String,
-        context: Context? = null,
-        uri: Uri? = null,
-        filename: String? = null,
-        ocrText: String? = null,
-    ): JSONObject {
-        val token = auth.currentUser?.getIdToken(false)?.await()?.token ?: throw IOException("Not signed in")
+    suspend fun uploadDocument(context: Context, caseId: Int, doc: UploadedDoc, docType: String?): Int {
+        val token = idToken()
         val url = baseUrl() + "/cases/$caseId/documents"
-        val boundary = "==MedSureBoundary" + System.currentTimeMillis() + "=="
-        val lineEnd = "\r\n"
-
+        val boundary = "MedSure" + System.nanoTime()
         return withContext(Dispatchers.IO) {
             val conn = URL(url).openConnection() as HttpURLConnection
             try {
                 conn.requestMethod = "POST"
                 conn.connectTimeout = 30_000
-                conn.readTimeout = 60_000
+                conn.readTimeout = 120_000
                 conn.doOutput = true
+                conn.setChunkedStreamingMode(64 * 1024) // large scans are streamed, not held in memory
                 conn.setRequestProperty("Authorization", "Bearer $token")
                 conn.setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
-
-                DataOutputStream(conn.outputStream).use { dos ->
-                    // Form field: doc_type
-                    dos.writeBytes("--$boundary$lineEnd")
-                    dos.writeBytes("Content-Disposition: form-data; name=\"doc_type\"$lineEnd$lineEnd")
-                    dos.writeBytes(docType + lineEnd)
-
-                    // Optional form field: ocr_text
-                    if (!ocrText.isNullOrBlank()) {
-                        dos.writeBytes("--$boundary$lineEnd")
-                        dos.writeBytes("Content-Disposition: form-data; name=\"ocr_text\"$lineEnd$lineEnd")
-                        dos.write(ocrText.toByteArray(Charsets.UTF_8))
-                        dos.writeBytes(lineEnd)
+                conn.outputStream.use { out ->
+                    val crlf = "\r\n"
+                    fun part(headers: String) = out.write("--$boundary$crlf$headers$crlf$crlf".toByteArray())
+                    if (docType != null) {
+                        part("Content-Disposition: form-data; name=\"doc_type\"")
+                        out.write("$docType$crlf".toByteArray())
                     }
-
-                    // Optional file content
-                    if (context != null && uri != null) {
-                        val fn = filename ?: "document.pdf"
-                        dos.writeBytes("--$boundary$lineEnd")
-                        dos.writeBytes("Content-Disposition: form-data; name=\"file\"; filename=\"$fn\"$lineEnd")
-                        dos.writeBytes("Content-Type: application/octet-stream$lineEnd$lineEnd")
-                        context.contentResolver.openInputStream(uri)?.use { input ->
-                            val buffer = ByteArray(8192)
-                            var read: Int
-                            while (input.read(buffer).also { read = it } != -1) {
-                                dos.write(buffer, 0, read)
-                            }
-                        }
-                        dos.writeBytes(lineEnd)
-                    }
-
-                    // End of multipart
-                    dos.writeBytes("--$boundary--$lineEnd")
-                    dos.flush()
+                    val name = doc.name.replace("\"", "'")
+                    part("Content-Disposition: form-data; name=\"file\"; filename=\"$name\"${crlf}Content-Type: ${doc.mimeType.ifBlank { "application/octet-stream" }}")
+                    val input = context.contentResolver.openInputStream(doc.uri)
+                        ?: throw IOException("Cannot open ${doc.name}; pick the file again")
+                    input.use { it.copyTo(out) }
+                    out.write("$crlf--$boundary--$crlf".toByteArray())
                 }
-
                 val code = conn.responseCode
                 val text = (if (code in 200..299) conn.inputStream else conn.errorStream)
                     ?.bufferedReader()?.use { it.readText() }.orEmpty()
-                if (code !in 200..299) throw IOException("Upload failed ($code): ${text.take(200)}")
-                JSONObject(text)
+                if (code !in 200..299) throw IOException("Upload of ${doc.name} failed ($code): ${detail(text)}")
+                JSONObject(text).getJSONArray("documents").getJSONObject(0).getInt("id")
+            } catch (e: java.net.SocketException) {
+                base = null
+                throw e
             } finally {
                 conn.disconnect()
             }
         }
     }
 
-    suspend fun getDocumentStatus(docId: Int): JSONObject {
-        return JSONObject(request("GET", "/documents/$docId"))
+    suspend fun document(docId: Int): DocumentInfoModel =
+        parseDocuments(JSONArray().put(JSONObject(request("GET", "/documents/$docId")))).first()
+
+    /** Reads a failed document again. */
+    suspend fun retryDocument(docId: Int) {
+        request("POST", "/documents/$docId/retry")
     }
 
-    suspend fun listDocuments(caseId: Int): JSONArray {
-        return JSONArray(request("GET", "/cases/$caseId/documents"))
+    suspend fun listDocuments(caseId: Int): JSONArray = JSONArray(request("GET", "/cases/$caseId/documents"))
+
+    suspend fun getDischargeCard(caseId: Int): JSONObject? = getOrNull("/cases/$caseId/discharge-card")
+
+    suspend fun getBill(caseId: Int): JSONObject = JSONObject(request("GET", "/cases/$caseId/bill"))
+
+    /** The latest bill-vs-policy comparison, or null before both documents are read. */
+    suspend fun getCoverage(caseId: Int): JSONObject? = getOrNull("/cases/$caseId/coverage")
+
+    /** Runs the bill-vs-policy comparison now. */
+    suspend fun runCoverage(caseId: Int): JSONObject = JSONObject(request("POST", "/cases/$caseId/coverage"))
+
+    /** Rule-based extraction of every document, for the debug screen. */
+    suspend fun getCaseExtractions(caseId: Int): JSONObject = JSONObject(request("GET", "/cases/$caseId/extractions"))
+
+    private suspend fun getOrNull(path: String): JSONObject? = try {
+        JSONObject(request("GET", path))
+    } catch (e: HttpError) {
+        if (e.code == 404) null else throw e
     }
 
-    suspend fun getDischargeCard(caseId: Int): JSONObject? {
-        return try {
-            JSONObject(request("GET", "/cases/$caseId/discharge-card"))
-        } catch (e: IOException) {
-            if (e.message?.contains("404") == true) null else throw e
-        }
-    }
+    /** An error response from the backend. message is safe to show. */
+    class HttpError(val code: Int, message: String) : IOException(message)
 
-    suspend fun getBill(caseId: Int): JSONObject {
-        return JSONObject(request("GET", "/cases/$caseId/bill"))
-    }
+    /** FastAPI puts the reason in {"detail": "..."}. */
+    private fun detail(body: String): String =
+        runCatching { JSONObject(body).getString("detail") }.getOrDefault(body.take(200))
 
-    suspend fun askAboutDocuments(caseId: Int, question: String): JSONObject {
-        val body = JSONObject().put("question", question)
-        return JSONObject(request("POST", "/cases/$caseId/ask", body))
-    }
+    private suspend fun idToken(): String =
+        auth.currentUser?.getIdToken(false)?.await()?.token ?: throw IOException("Not signed in")
 
     // ==================== NETWORKING INTERNALS ====================
 
@@ -242,19 +231,15 @@ object Backend {
     }.getOrDefault(false)
 
     private suspend fun request(method: String, path: String, body: JSONObject? = null): String {
-        val token = runCatching { auth.currentUser?.getIdToken(false)?.await()?.token }.getOrNull()
+        val token = idToken()
         val url = baseUrl()
         return withContext(Dispatchers.IO) {
             val conn = URL(url + path).openConnection() as HttpURLConnection
             try {
                 conn.requestMethod = method
                 conn.connectTimeout = 15_000
-                conn.readTimeout = 30_000
-                if (!token.isNullOrBlank()) {
-                    conn.setRequestProperty("Authorization", "Bearer $token")
-                } else {
-                    conn.setRequestProperty("X-User-Id", "android-dev-user")
-                }
+                conn.readTimeout = 60_000 // the coverage check waits for the AI
+                conn.setRequestProperty("Authorization", "Bearer $token")
                 if (body != null) {
                     conn.doOutput = true
                     conn.setRequestProperty("Content-Type", "application/json")
@@ -263,7 +248,7 @@ object Backend {
                 val code = conn.responseCode
                 val text = (if (code in 200..299) conn.inputStream else conn.errorStream)
                     ?.bufferedReader()?.use { it.readText() }.orEmpty()
-                if (code !in 200..299) throw IOException("$method $path failed ($code): ${text.take(200)}")
+                if (code !in 200..299) throw HttpError(code, detail(text))
                 text
             } catch (e: java.net.SocketException) {
                 base = null // the network changed; look for the backend again next time
@@ -275,98 +260,5 @@ object Backend {
                 conn.disconnect()
             }
         }
-    }
-
-    /**
-     * Uploads documents via multipart/form-data to POST /cases/{caseId}/documents.
-     * Streams file bytes safely from Android Uri using ContentResolver.
-     * Returns the generated job_id for background processing tracking.
-     */
-    suspend fun uploadDocuments(
-        context: android.content.Context,
-        caseId: Int,
-        docs: List<com.powerbank.medsure.state.UploadedDoc>
-    ): String {
-        if (docs.isEmpty()) return ""
-        val token = runCatching { auth.currentUser?.getIdToken(false)?.await()?.token }.getOrNull()
-        val url = baseUrl()
-        val boundary = "==MedSureBoundary" + System.currentTimeMillis() + "=="
-        val lineEnd = "\r\n"
-        val twoHyphens = "--"
-
-        return withContext(Dispatchers.IO) {
-            val conn = URL("$url/cases/$caseId/documents").openConnection() as HttpURLConnection
-            try {
-                conn.requestMethod = "POST"
-                conn.connectTimeout = 20_000
-                conn.readTimeout = 60_000
-                conn.doOutput = true
-                conn.doInput = true
-                conn.useCaches = false
-                conn.setRequestProperty("Connection", "Keep-Alive")
-                conn.setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
-                if (!token.isNullOrBlank()) {
-                    conn.setRequestProperty("Authorization", "Bearer $token")
-                } else {
-                    conn.setRequestProperty("X-User-Id", "android-dev-user")
-                }
-
-                conn.outputStream.use { output ->
-                    val writer = output.bufferedWriter(Charsets.UTF_8)
-                    for (doc in docs) {
-                        writer.write(twoHyphens + boundary + lineEnd)
-                        writer.write("Content-Disposition: form-data; name=\"files\"; filename=\"${doc.name}\"$lineEnd")
-                        writer.write("Content-Type: ${doc.mimeType.ifBlank { "application/octet-stream" }}$lineEnd")
-                        writer.write(lineEnd)
-                        writer.flush()
-
-                        // Safely stream file bytes from Android ContentResolver
-                        context.contentResolver.openInputStream(doc.uri)?.use { input ->
-                            val buffer = ByteArray(16384)
-                            var bytesRead: Int
-                            while (input.read(buffer).also { bytesRead = it } != -1) {
-                                output.write(buffer, 0, bytesRead)
-                            }
-                            output.flush()
-                        }
-                        writer.write(lineEnd)
-                        writer.flush()
-                    }
-                    writer.write(twoHyphens + boundary + twoHyphens + lineEnd)
-                    writer.flush()
-                }
-
-                val code = conn.responseCode
-                val text = (if (code in 200..299) conn.inputStream else conn.errorStream)
-                    ?.bufferedReader()?.use { it.readText() }.orEmpty()
-                if (code !in 200..299) throw IOException("Upload failed ($code): ${text.take(200)}")
-
-                val json = JSONObject(text)
-                json.optString("job_id", "")
-            } catch (e: java.net.SocketException) {
-                base = null
-                throw e
-            } catch (e: java.net.SocketTimeoutException) {
-                base = null
-                throw e
-            } finally {
-                conn.disconnect()
-            }
-        }
-    }
-
-    suspend fun getJobStatus(jobId: String): JSONObject {
-        val text = request("GET", "/jobs/$jobId")
-        return JSONObject(text)
-    }
-
-    suspend fun getCaseExtractions(caseId: Int): JSONObject {
-        val text = request("GET", "/cases/$caseId/extractions")
-        return JSONObject(text)
-    }
-
-    suspend fun getDocumentExtraction(caseId: Int, docId: Int): JSONObject {
-        val text = request("GET", "/cases/$caseId/extractions/$docId")
-        return JSONObject(text)
     }
 }

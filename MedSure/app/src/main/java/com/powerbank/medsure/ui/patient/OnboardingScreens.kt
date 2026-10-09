@@ -37,6 +37,8 @@ import com.powerbank.medsure.ui.theme.Ms
 
 /** Query document name, size, and mime type from content resolver. */
 fun queryDocInfo(context: Context, uri: Uri): UploadedDoc {
+    // Keep read access after a restart: the picked files are uploaded later, maybe after the app was closed.
+    runCatching { context.contentResolver.takePersistableUriPermission(uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION) }
     var name = "Document"
     var size = 0L
     val mime = context.contentResolver.getType(uri) ?: "application/octet-stream"

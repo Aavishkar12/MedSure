@@ -46,7 +46,8 @@ class Tx(private val lang: String?) {
         else -> CallDict.en
     }
 
-    operator fun get(key: String): String = map[key] ?: extra[key] ?: Dict.en[key] ?: CallDict.en[key] ?: key
+    operator fun get(key: String): String =
+        map[key] ?: extra[key] ?: Dict.en[key] ?: CallDict.en[key] ?: DocDict.en[key] ?: key
 
     val times: List<String> = when (lang) {
         "ta" -> Dict.ta_times

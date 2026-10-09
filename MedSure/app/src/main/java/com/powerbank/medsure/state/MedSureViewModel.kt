@@ -28,8 +28,6 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import org.json.JSONArray
-import org.json.JSONObject
 import java.time.LocalDate
 
 enum class Stage { Lang, Welcome, Details, Otp, Onboarding, Processing, App }
@@ -76,6 +74,16 @@ const val NEXT_CALL_COUNTDOWN_SECONDS = 3
 /** Relations the app has a label for; anything else shows as "Other". */
 private val KNOWN_RELATIONS = setOf("son", "daughter", "spouse", "other")
 
+/** Papers an insurance claim needs: upload category, label key, and whether the claim cannot go without it. */
+private val CLAIM_PAPERS = listOf(
+    Triple("discharge_summary", "cpDischarge", true),
+    Triple("bill", "cpBill", true),
+    Triple("policy", "cpPolicy", true),
+    Triple("id_proof", "cpId", true),
+    Triple("lab_report", "cpLab", false),
+    Triple("prescription", "cpRx", false),
+)
+
 /** Bump when the saved-state format changes; older saved state is then dropped. */
 private const val STATE_VERSION = 2
 
@@ -101,86 +109,6 @@ data class CheckItem(
 )
 
 data class Approval(val title: String, val sub: String, val open: () -> Unit)
-
-// ==================== LLM & ANALYSIS MODELS ====================
-
-data class MedicineItemModel(
-    val name: String,
-    val dose: String = "",
-    val schedule: String = "",
-    val purpose: String = "",
-    val flag: String? = null,
-    val sourcePage: Int? = null,
-)
-
-data class LabValueModel(
-    val test: String,
-    val value: String = "",
-    val unit: String = "",
-    val referenceRange: String = "",
-    val status: String = "normal",
-    val explanation: String = "",
-    val sourcePage: Int? = null,
-)
-
-data class PrecautionModel(
-    val text: String,
-    val sourcePage: Int? = null,
-)
-
-data class FollowUpModel(
-    val what: String,
-    val whenTime: String = "",
-    val sourcePage: Int? = null,
-)
-
-data class DischargeCardModel(
-    val id: Int,
-    val caseId: Int,
-    val documentId: Int,
-    val diagnosisName: String,
-    val diagnosisPlain: String,
-    val medicines: List<MedicineItemModel> = emptyList(),
-    val labValues: List<LabValueModel> = emptyList(),
-    val precautions: List<PrecautionModel> = emptyList(),
-    val followUps: List<FollowUpModel> = emptyList(),
-    val disclaimer: String = "This explains your documents. It is not medical advice.",
-)
-
-data class BillItemModel(
-    val id: Int,
-    val description: String,
-    val amount: Double,
-    val explanation: String = "",
-    val category: String? = null,
-)
-
-data class BillDataModel(
-    val total: Double,
-    val items: List<BillItemModel> = emptyList(),
-)
-
-data class DocumentInfoModel(
-    val id: Int,
-    val docType: String,
-    val filename: String,
-    val status: String,
-    val error: String? = null,
-)
-
-data class QASourceModel(
-    val documentId: Int?,
-    val docType: String?,
-    val page: Int?,
-    val quote: String,
-)
-
-data class QAResultModel(
-    val question: String,
-    val answer: String,
-    val grounded: Boolean,
-    val sources: List<QASourceModel> = emptyList(),
-)
 
 /** All app state. Mirrors the web prototype one-to-one so the screens behave the same. */
 class MedSureViewModel(app: Application) : AndroidViewModel(app) {
@@ -263,14 +191,16 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
     var onbInsDoc by mutableStateOf<UploadedDoc?>(null)
     val onbFamilyMembers = mutableStateListOf<OnboardingFamilyMember>()
 
-    // Real document extraction processing states
+    // Reading the onboarding documents (ProcessingScreen shows these)
     var processingError by mutableStateOf<String?>(null)
-    var processingJobId by mutableStateOf<String?>(null)
     var processingActiveStep by mutableIntStateOf(0)
     var processingCompletedSteps by mutableIntStateOf(0)
     var processingTargetProgress by mutableFloatStateOf(0.08f)
     var processingCompletedPills by mutableIntStateOf(0)
-    var extractedData by mutableStateOf<org.json.JSONObject?>(null)
+    private var processingJob: Job? = null
+    /** Onboarding file (uri) -> backend document id, so a retry never uploads the same file twice. */
+    private val uploadedDocs = mutableStateMapOf<String, Int>()
+    var extractedData by mutableStateOf<JSONObject?>(null)
     var showExtractionDebug by mutableStateOf(false)
 
     val onbStep1Valid: Boolean
@@ -303,116 +233,66 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
         saveOnboarding()
     }
 
-    fun startProcessing(context: android.content.Context) {
+    /**
+     * Uploads the onboarding documents and waits while the backend reads them (OCR + AI), so the
+     * home screen opens with the patient's own discharge card, bill and policy. Safe to call again
+     * after a failure: files already uploaded are not sent twice, and failed ones are read again.
+     */
+    fun startProcessing(context: Context) {
+        if (processingJob?.isActive == true) return
         processingError = null
-        val allDocs = (onbReports + onbBills + listOfNotNull(onbInsDoc)).toList()
-        viewModelScope.launch {
-            val startTime = System.currentTimeMillis()
-            val minDisplayMs = 3500L
-
+        val app = context.applicationContext
+        processingJob = viewModelScope.launch {
             try {
-                // Step 1: Securing your documents (uploading & preparing)
-                processingActiveStep = 0
-                processingTargetProgress = 0.25f
-                processingCompletedPills = 1
+                processingActiveStep = 0; processingTargetProgress = 0.2f; processingCompletedPills = 1
+                saveOnboardingMembers()
+                val id = syncLock.withLock { ensureSession(createCase = true) }
+                    ?: throw java.io.IOException("Could not create your case on the server")
+                processingCompletedSteps = 1; processingCompletedPills = 2
 
-                // Ensure user profile & case exist on backend
-                val name = onbFullName.trim().ifEmpty { me }
-                runCatching { Backend.signIn() }
-                runCatching { Backend.saveProfile(name, phone, email) }
-                val id = caseId ?: Backend.firstCaseId() ?: Backend.createCase(name, "self")
-                caseId = id
-
-                // Save onboarding helpers
-                val helpers = onbFamilyMembers.toList()
-                helpers.forEach { h ->
-                    if (members.none { it.name == h.name && it.phone == h.phone }) {
-                        members.add(Member(h.name, "other", if (h.canApprove) "approve" else "view", false, normalizePhone(h.phone)))
+                // Reports go up without a type: the server tells a discharge summary from a lab report by its text.
+                processingActiveStep = 1; processingTargetProgress = 0.4f
+                val pending = onbReports.map { it to null } + onbBills.map { it to "bill" } + listOfNotNull(onbInsDoc).map { it to "policy" }
+                for ((doc, type) in pending) {
+                    val key = doc.uri.toString()
+                    val known = uploadedDocs[key]
+                    if (known == null) {
+                        uploadedDocs[key] = Backend.uploadDocument(app, id, doc, type)
+                    } else if (Backend.document(known).status == "failed") {
+                        Backend.retryDocument(known)
                     }
-                    runCatching { Backend.addMember(id, h.name, "family", h.canApprove, h.phone, "") }
                 }
-                runCatching { Backend.registerDevice() }
+                processingCompletedSteps = 2; processingCompletedPills = 3
 
-                if (allDocs.isNotEmpty()) {
-                    // Real multipart document upload
-                    val jobId = Backend.uploadDocuments(context, id, allDocs)
-                    processingJobId = jobId
-                    processingCompletedSteps = 1
-                    processingCompletedPills = 2
-
-                    // Step 2: Reading your discharge papers (extracting & classifying)
-                    processingActiveStep = 1
-                    processingTargetProgress = 0.50f
-
-                    var isDone = false
-                    var pollCount = 0
-                    while (!isDone && pollCount < 40) {
-                        delay(600)
-                        pollCount++
-                        val jobJson = Backend.getJobStatus(jobId)
-                        val stageStr = jobJson.optString("stage", "")
-                        val prog = jobJson.optDouble("progress", 0.5).toFloat()
-
-                        if (stageStr == "extracting" || stageStr == "classifying") {
-                            processingActiveStep = 1
-                            processingTargetProgress = 0.50f.coerceAtLeast(prog)
-                        } else if (stageStr == "parsing" || stageStr == "validating") {
-                            processingCompletedSteps = 2
-                            processingActiveStep = 2
-                            processingTargetProgress = 0.75f.coerceAtLeast(prog)
-                            processingCompletedPills = 3
-                        } else if (stageStr == "completed") {
-                            processingCompletedSteps = 3
-                            processingActiveStep = 3
-                            processingTargetProgress = 1.0f
-                            processingCompletedPills = 4
-                            isDone = true
-                        } else if (stageStr == "failed") {
-                            val err = jobJson.optString("error", "Document processing encountered an issue on server")
-                            throw java.io.IOException(err)
-                        }
-                    }
-
-                    // Retrieve extracted data for inspection
-                    runCatching {
-                        extractedData = Backend.getCaseExtractions(id)
-                    }
-                } else {
-                    // When no documents were attached, proceed through the minimum display steps
-                    delay(800)
-                    processingCompletedSteps = 1
-                    processingActiveStep = 1
-                    processingTargetProgress = 0.50f
-                    processingCompletedPills = 2
-                    delay(800)
-                    processingCompletedSteps = 2
-                    processingActiveStep = 2
-                    processingTargetProgress = 0.75f
-                    processingCompletedPills = 3
-                    delay(800)
+                // The AI takes a few seconds per document; scans and long PDFs take longer.
+                processingActiveStep = 2
+                val ids = pending.mapNotNull { uploadedDocs[it.first.uri.toString()] }
+                val deadline = System.currentTimeMillis() + 180_000
+                var docs = ids.map { Backend.document(it) }
+                while (docs.any { it.status == "processing" } && System.currentTimeMillis() < deadline) {
+                    val done = docs.count { it.status != "processing" }
+                    processingTargetProgress = 0.5f + 0.4f * done / docs.size.coerceAtLeast(1)
+                    delay(1500)
+                    docs = ids.map { Backend.document(it) }
                 }
+                processingCompletedSteps = 3; processingCompletedPills = 4
 
-                // Step 4: Preparing your home screen
-                processingCompletedSteps = 4
-                processingActiveStep = 3
-                processingTargetProgress = 1.0f
-                processingCompletedPills = 5
-
-                // Enforce minimum display duration so screen transitions smoothly
-                val elapsed = System.currentTimeMillis() - startTime
-                if (elapsed < minDisplayMs) {
-                    delay(minDisplayMs - elapsed)
+                processingActiveStep = 3; processingTargetProgress = 0.95f
+                loadCaseAnalysis(id)
+                runCatching { extractedData = Backend.getCaseExtractions(id) }
+                val failed = docs.filter { it.status == "failed" }
+                val slow = docs.filter { it.status == "processing" }
+                if (failed.isNotEmpty() || slow.isNotEmpty()) {
+                    processingError = (failed.map { "${it.filename}: ${it.error ?: "could not be read"}" } +
+                        slow.map { "${it.filename}: still being read" }).joinToString("\n")
+                    return@launch
                 }
+                processingCompletedSteps = 4; processingCompletedPills = 5; processingTargetProgress = 1f
                 delay(400)
-
-                // Navigate to Patient Home without changing existing dummy values
-                stage = Stage.App
-                overlay = null
-                ptab = PTab.Today
-                ftab = FTab.Home
+                completeProcessing()
             } catch (e: Exception) {
-                Log.e("MedSure", "Document pipeline processing failed", e)
-                processingError = e.message ?: "Failed to connect to backend server"
+                Log.e("MedSure", "Document processing failed", e)
+                processingError = e.message ?: "Could not reach the MedSure server"
             }
         }
     }
@@ -439,6 +319,12 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Onboarding finished: show the helpers in the family circle and send everything to the backend. */
     private fun saveOnboarding() {
+        saveOnboardingMembers()
+        send("Onboarding")
+    }
+
+    /** The helpers added during onboarding join the family circle; the next sync sends them. */
+    private fun saveOnboardingMembers() {
         onbFamilyMembers.forEach { h ->
             val number = normalizePhone(h.phone)
             if (members.none { it.phone == number }) {
@@ -446,7 +332,6 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
         sessionStale = true
-        send("Onboarding")
     }
 
     /** Logging out leaves a clean slate for whoever signs in next on this phone. */
@@ -463,7 +348,10 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
         step = 0; ans.clear(); listening = false; note = ""; noteSaved = ""
         taken.clear(); taken.putAll(mapOf("d1" to true, "d2" to true, "d3" to false, "d4" to false))
         medChange = "pending"; sent.clear(); k4 = false; k5 = false; approved = false
-        caseId = null; lastCheckinId = null; sentNote = ""
+        caseId = null; lastCheckinId = null; sentNote = ""; patientName = ""
+        processingJob?.cancel(); processingError = null; uploadedDocs.clear(); extractedData = null
+        dischargeCardData = null; billData = null; coverage = null; caseDocuments.clear(); rawPlaces.clear()
+        cardJson = null; billJson = null; coverageJson = null; documentsJson = null
         sessionStale = true; pendingCheckin = false; stateDirty = false
         sync("Sign-out") { Backend.signOut() }
     }
@@ -483,33 +371,31 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
     private var sentNote by mutableStateOf("")
     private val syncLock = Mutex()
 
-    // LLM Document Analysis & Q&A
+    // What the backend read from this case's documents. Kept on the phone too (see snapshot), so the
+    // screens show the patient's own data straight away after a restart.
     var dischargeCardData by mutableStateOf<DischargeCardModel?>(null)
     var billData by mutableStateOf<BillDataModel?>(null)
+    var coverage by mutableStateOf<CoverageModel?>(null)
     val caseDocuments = mutableStateListOf<DocumentInfoModel>()
-    var isProcessingDocs by mutableStateOf(false)
-    var processingStatusText by mutableStateOf("Ready")
-    var processingProgress by mutableFloatStateOf(0f)
-
-    // Q&A State
-    var qaQuestion by mutableStateOf("")
-    var qaLoading by mutableStateOf(false)
-    var qaError by mutableStateOf<String?>(null)
-    val qaHistory = mutableStateListOf<QAResultModel>()
+    var coverageRunning by mutableStateOf(false)
+    private var cardJson: String? = null
+    private var billJson: String? = null
+    private var coverageJson: String? = null
+    private var documentsJson: String? = null
 
     init {
         viewModelScope.launch { PushBus.events.collect { refresh() } }
     }
 
     /** Signs in and makes sure the backend has this person's profile, case and family circle. Returns the case id. */
-    private suspend fun ensureSession(): Int? {
+    private suspend fun ensureSession(createCase: Boolean = stage == Stage.App): Int? {
         Backend.signIn()
         if (sessionStale) {
             // Family have no name field at sign-in: the backend keeps the name the patient gave them.
             val name = if (isPatient) onbFullName.trim().ifEmpty { me } else ""
             Backend.saveProfile(name, phone, email) // also links this phone number to the cases it was invited to
             var id = Backend.myCaseId(isPatient)
-            if (id == null && isPatient && stage == Stage.App) id = Backend.createCase(name, "self")
+            if (id == null && isPatient && createCase) id = Backend.createCase(name, "self")
             caseId = id
             if (id != null) {
                 members.filter { !it.you && it.phone.isNotBlank() }.forEach {
@@ -552,13 +438,17 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
     /** Brings in what the others on the case did. */
     private suspend fun pull(id: Int) {
         // Family circle: the same list on every phone.
-        val circle = Backend.members(id).filter { it.relation != "self" }.map {
+        val everyone = Backend.members(id)
+        everyone.firstOrNull { it.relation == "self" }?.name?.takeIf { it.isNotBlank() }?.let { patientName = it }
+        val circle = everyone.filter { it.relation != "self" }.map {
             Member(
                 it.name.ifBlank { "Family" }, if (it.relation in KNOWN_RELATIONS) it.relation else "other",
                 if (it.canApprove) "approve" else "view", it.you, normalizePhone(it.phone),
             )
         }
         if (!sessionStale && circle != members.toList()) { members.clear(); members.addAll(circle) }
+
+        loadCaseAnalysis(id)
 
         val shared = Backend.sharedState(id)
         // A medicine change is decided by family; tablets taken are ticked by the patient.
@@ -592,323 +482,76 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
     /** Sends local changes now. If it fails they stay marked and the next refresh retries. */
     private fun send(what: String) = sync(what) { ensureSession()?.let { flush(it) } }
 
-    /** Loads DischargeCard, Bill, and Documents list from the backend. */
+    /** Fetches what the backend has read from the case's documents. A missing piece leaves the old one in place. */
     suspend fun loadCaseAnalysis(id: Int) {
-        try {
-            val cardJson = Backend.getDischargeCard(id)
-            if (cardJson != null) {
-                dischargeCardData = parseDischargeCard(cardJson)
-            }
-        } catch (e: Exception) {
-            Log.w("MedSure", "Failed to fetch discharge card", e)
-        }
-
-        try {
-            val billJson = Backend.getBill(id)
-            billData = parseBill(billJson)
-        } catch (e: Exception) {
-            Log.w("MedSure", "Failed to fetch bill", e)
-        }
-
-        try {
-            val docsArr = Backend.listDocuments(id)
-            caseDocuments.clear()
-            caseDocuments.addAll(parseDocuments(docsArr))
-        } catch (e: Exception) {
-            Log.w("MedSure", "Failed to fetch documents", e)
-        }
+        runCatching { Backend.listDocuments(id) }.onSuccess { arr ->
+            documentsJson = arr.toString(); setDocuments(parseDocuments(arr))
+        }.onFailure { Log.w("MedSure", "Documents fetch failed", it) }
+        runCatching { Backend.getDischargeCard(id) }.onSuccess { json ->
+            cardJson = json?.toString(); dischargeCardData = json?.let(::parseDischargeCard)
+        }.onFailure { Log.w("MedSure", "Discharge card fetch failed", it) }
+        runCatching { Backend.getBill(id) }.onSuccess { json ->
+            billJson = json.toString(); billData = parseBill(json).takeIf { it.items.isNotEmpty() }
+        }.onFailure { Log.w("MedSure", "Bill fetch failed", it) }
+        runCatching { Backend.getCoverage(id) }.onSuccess { json ->
+            coverageJson = json?.toString(); coverage = json?.let(::parseCoverage)
+        }.onFailure { Log.w("MedSure", "Coverage fetch failed", it) }
     }
 
-    /** Real document onboarding pipeline: creates case, uploads pending reports/bills/policy, waits for analysis. */
-    suspend fun processOnboardingDocs(context: Context, onStep: (Int) -> Unit = {}) {
-        isProcessingDocs = true
-        processingStatusText = "Securing your profile..."
-        onStep(0)
-
-        try {
-            Backend.signIn()
-            val name = onbFullName.trim().ifEmpty { me }
-            Backend.saveProfile(name, phone, email)
-            val id = caseId ?: Backend.firstCaseId() ?: Backend.createCase(name, "self")
-            caseId = id
-
-            val helpers = onbFamilyMembers.toList()
-            helpers.forEach { h ->
-                if (members.none { it.name == h.name && it.phone == h.phone }) {
-                    members.add(Member(h.name, "other", if (h.canApprove) "approve" else "view", false, normalizePhone(h.phone)))
-                }
-                Backend.addMember(id, h.name, "family", h.canApprove, h.phone, "")
-            }
-            Backend.registerDevice()
-
-            onStep(1)
-            processingStatusText = "Reading your medical documents..."
-
-            val pendingDocs = mutableListOf<Pair<UploadedDoc, String>>()
-            onbReports.forEach { doc ->
-                val lower = doc.name.lowercase()
-                val type = when {
-                    lower.contains("bill") || lower.contains("inv") -> "bill"
-                    lower.contains("lab") || lower.contains("test") || lower.contains("blood") || lower.contains("cbc") -> "lab_report"
-                    lower.contains("rx") || lower.contains("presc") -> "prescription"
-                    else -> "discharge_summary"
-                }
-                pendingDocs.add(doc to type)
-            }
-            onbBills.forEach { doc ->
-                pendingDocs.add(doc to "bill")
-            }
-            onbInsDoc?.let { doc ->
-                pendingDocs.add(doc to "policy")
-            }
-
-            val uploadedIds = mutableListOf<Int>()
-            for ((doc, docType) in pendingDocs) {
-                try {
-                    val resp = Backend.uploadDocument(caseId = id, docType = docType, context = context, uri = doc.uri, filename = doc.name)
-                    val docId = resp.optInt("id", 0)
-                    if (docId > 0) uploadedIds.add(docId)
-                } catch (e: Exception) {
-                    Log.w("MedSure", "Failed to upload doc ${doc.name}", e)
-                }
-            }
-
-            onStep(2)
-            processingStatusText = "Extracting care instructions with Groq AI..."
-
-            if (uploadedIds.isNotEmpty()) {
-                val start = System.currentTimeMillis()
-                while (System.currentTimeMillis() - start < 16_000) {
-                    delay(1500)
-                    var allDone = true
-                    for (docId in uploadedIds) {
-                        try {
-                            val st = Backend.getDocumentStatus(docId)
-                            val status = st.optString("status")
-                            if (status == "processing") {
-                                allDone = false
-                                break
-                            }
-                        } catch (_: Exception) {}
-                    }
-                    if (allDone) break
-                }
-            }
-
-            onStep(3)
-            processingStatusText = "Setting up your home screen..."
-            loadCaseAnalysis(id)
-            delay(400)
-        } catch (e: Exception) {
-            Log.e("MedSure", "Error processing onboarding docs", e)
-        } finally {
-            isProcessingDocs = false
-            processingStatusText = "Ready"
-        }
+    private fun setDocuments(list: List<DocumentInfoModel>) {
+        if (list != caseDocuments.toList()) { caseDocuments.clear(); caseDocuments.addAll(list) }
     }
 
-    /** Uploads a single document on-demand and refreshes case analysis. */
-    fun uploadSingleDoc(context: Context, doc: UploadedDoc, docType: String) {
-        val id = caseId ?: return
-        sync("Upload document") {
+    var addingDocs by mutableStateOf(false)
+    var addDocsError by mutableStateOf<String?>(null)
+
+    /**
+     * Uploads papers added after onboarding and waits for the backend to read them.
+     * docType null lets the server tell a discharge summary, lab report, bill or policy apart by its text.
+     */
+    fun addDocuments(context: Context, docs: List<UploadedDoc>, docType: String? = null) {
+        if (docs.isEmpty() || addingDocs) return
+        val app = context.applicationContext
+        addingDocs = true
+        addDocsError = null
+        viewModelScope.launch {
             try {
-                isProcessingDocs = true
-                val resp = Backend.uploadDocument(caseId = id, docType = docType, context = context, uri = doc.uri, filename = doc.name)
-                val docId = resp.optInt("id", 0)
-                if (docId > 0) {
-                    val start = System.currentTimeMillis()
-                    while (System.currentTimeMillis() - start < 20_000) {
-                        delay(2000)
-                        val st = Backend.getDocumentStatus(docId)
-                        val status = st.optString("status")
-                        if (status == "ready" || status == "failed") break
-                    }
+                val id = syncLock.withLock { ensureSession(createCase = isPatient) }
+                    ?: throw java.io.IOException(tx["noCaseYet"])
+                val ids = docs.map { Backend.uploadDocument(app, id, it, docType) }
+                loadCaseAnalysis(id) // shows them as "being read" straight away
+                val deadline = System.currentTimeMillis() + 180_000
+                var states = ids.map { Backend.document(it) }
+                while (states.any { it.status == "processing" } && System.currentTimeMillis() < deadline) {
+                    delay(2000)
+                    states = ids.map { Backend.document(it) }
                 }
                 loadCaseAnalysis(id)
-            } finally {
-                isProcessingDocs = false
-            }
-        }
-    }
-
-    /** Ask a question about the uploaded medical documents. */
-    fun askQuestion(q: String) {
-        val id = caseId ?: return
-        val trimmed = q.trim()
-        if (trimmed.isEmpty()) return
-        qaLoading = true
-        qaError = null
-        sync("Ask AI") {
-            try {
-                val resp = Backend.askAboutDocuments(id, trimmed)
-                val model = parseAnswer(resp, trimmed)
-                qaHistory.add(0, model)
-                qaQuestion = ""
-            } catch (e: Exception) {
-                Log.e("MedSure", "Ask AI failed", e)
-                qaError = e.message ?: "Failed to get an answer. Please try again."
-            } finally {
-                qaLoading = false
-            }
-        }
-    }
-
-    private fun parseDischargeCard(json: JSONObject): DischargeCardModel {
-        val id = json.optInt("id", 0)
-        val caseId = json.optInt("case_id", 0)
-        val docId = json.optInt("document_id", 0)
-        val data = json.optJSONObject("data") ?: JSONObject()
-
-        val diagObj = data.optJSONObject("diagnosis")
-        val diagName = diagObj?.optString("name") ?: data.optString("diagnosis", "Medical Summary")
-        val diagPlain = diagObj?.optString("plain") ?: ""
-
-        val meds = mutableListOf<MedicineItemModel>()
-        val medsArr = data.optJSONArray("medicines")
-        if (medsArr != null) {
-            for (i in 0 until medsArr.length()) {
-                val m = medsArr.optJSONObject(i) ?: continue
-                meds.add(
-                    MedicineItemModel(
-                        name = m.optString("name", "Medicine"),
-                        dose = m.optString("dose", ""),
-                        schedule = m.optString("schedule", ""),
-                        purpose = m.optString("purpose", ""),
-                        flag = m.optString("flag").takeIf { it.isNotBlank() },
-                        sourcePage = if (m.has("source_page") && !m.isNull("source_page")) m.optInt("source_page") else null,
-                    )
-                )
-            }
-        }
-
-        val labs = mutableListOf<LabValueModel>()
-        val labsArr = data.optJSONArray("lab_values")
-        if (labsArr != null) {
-            for (i in 0 until labsArr.length()) {
-                val l = labsArr.optJSONObject(i) ?: continue
-                labs.add(
-                    LabValueModel(
-                        test = l.optString("test", "Lab Test"),
-                        value = l.optString("value", ""),
-                        unit = l.optString("unit", ""),
-                        referenceRange = l.optString("reference_range", ""),
-                        status = l.optString("status", "normal"),
-                        explanation = l.optString("plain_explanation", ""),
-                        sourcePage = if (l.has("source_page") && !l.isNull("source_page")) l.optInt("source_page") else null,
-                    )
-                )
-            }
-        }
-
-        val precautions = mutableListOf<PrecautionModel>()
-        val precArr = data.optJSONArray("precautions")
-        if (precArr != null) {
-            for (i in 0 until precArr.length()) {
-                val p = precArr.opt(i)
-                if (p is JSONObject) {
-                    precautions.add(
-                        PrecautionModel(
-                            text = p.optString("text", ""),
-                            sourcePage = if (p.has("source_page") && !p.isNull("source_page")) p.optInt("source_page") else null,
-                        )
-                    )
-                } else if (p is String) {
-                    precautions.add(PrecautionModel(text = p))
+                states.filter { it.status == "failed" }.takeIf { it.isNotEmpty() }?.let { failed ->
+                    addDocsError = failed.joinToString("\n") { "${it.filename}: ${it.error ?: "could not be read"}" }
                 }
+            } catch (e: Exception) {
+                Log.w("MedSure", "Adding documents failed", e)
+                addDocsError = e.message ?: "Could not reach the MedSure server"
+            } finally {
+                addingDocs = false
             }
         }
+    }
 
-        val followUps = mutableListOf<FollowUpModel>()
-        val fuArr = data.optJSONArray("follow_ups")
-        if (fuArr != null) {
-            for (i in 0 until fuArr.length()) {
-                val f = fuArr.optJSONObject(i) ?: continue
-                followUps.add(
-                    FollowUpModel(
-                        what = f.optString("what", ""),
-                        whenTime = f.optString("when", ""),
-                        sourcePage = if (f.has("source_page") && !f.isNull("source_page")) f.optInt("source_page") else null,
-                    )
-                )
+    /** Compares the bill with the insurance policy again (family Claim tab). */
+    fun checkCoverage() {
+        if (coverageRunning) return
+        coverageRunning = true
+        sync("Coverage") {
+            try {
+                val id = ensureSession() ?: return@sync
+                val json = Backend.runCoverage(id)
+                coverageJson = json.toString(); coverage = parseCoverage(json)
+            } finally {
+                coverageRunning = false
             }
         }
-
-        val disclaimer = data.optString("disclaimer", "This explains your documents. It is not medical advice.")
-
-        return DischargeCardModel(
-            id = id,
-            caseId = caseId,
-            documentId = docId,
-            diagnosisName = diagName,
-            diagnosisPlain = diagPlain,
-            medicines = meds,
-            labValues = labs,
-            precautions = precautions,
-            followUps = followUps,
-            disclaimer = disclaimer,
-        )
-    }
-
-    private fun parseBill(json: JSONObject): BillDataModel {
-        val total = json.optDouble("total", 0.0)
-        val itemsArr = json.optJSONArray("items") ?: JSONArray()
-        val items = mutableListOf<BillItemModel>()
-        for (i in 0 until itemsArr.length()) {
-            val item = itemsArr.optJSONObject(i) ?: continue
-            items.add(
-                BillItemModel(
-                    id = item.optInt("id", 0),
-                    description = item.optString("description", "Medical Service"),
-                    amount = item.optDouble("amount", 0.0),
-                    explanation = item.optString("explanation", ""),
-                    category = item.optString("category").takeIf { it.isNotBlank() },
-                )
-            )
-        }
-        return BillDataModel(total = total, items = items)
-    }
-
-    private fun parseDocuments(arr: JSONArray): List<DocumentInfoModel> {
-        val list = mutableListOf<DocumentInfoModel>()
-        for (i in 0 until arr.length()) {
-            val obj = arr.optJSONObject(i) ?: continue
-            list.add(
-                DocumentInfoModel(
-                    id = obj.optInt("id", 0),
-                    docType = obj.optString("doc_type", "document"),
-                    filename = obj.optString("filename", "document"),
-                    status = obj.optString("status", "processing"),
-                    error = obj.optString("error").takeIf { it.isNotBlank() },
-                )
-            )
-        }
-        return list
-    }
-
-    private fun parseAnswer(json: JSONObject, questionText: String): QAResultModel {
-        val ans = json.optString("answer", "No answer received.")
-        val grounded = json.optBoolean("grounded", false)
-        val sourcesArr = json.optJSONArray("sources")
-        val sources = mutableListOf<QASourceModel>()
-        if (sourcesArr != null) {
-            for (i in 0 until sourcesArr.length()) {
-                val s = sourcesArr.optJSONObject(i) ?: continue
-                sources.add(
-                    QASourceModel(
-                        documentId = if (s.has("document_id") && !s.isNull("document_id")) s.optInt("document_id") else null,
-                        docType = s.optString("document_type").takeIf { it.isNotBlank() },
-                        page = if (s.has("page") && !s.isNull("page")) s.optInt("page") else null,
-                        quote = s.optString("quote", ""),
-                    )
-                )
-            }
-        }
-        return QAResultModel(
-            question = questionText,
-            answer = ans,
-            grounded = grounded,
-            sources = sources,
-        )
     }
 
     /** Runs backend work off the screens, one piece at a time. The screens keep working if it fails. */
@@ -958,21 +601,31 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
 
     val me: String get() = if (isPatient) onbFullName.trim().substringBefore(' ').ifEmpty { "Lakshmi" } else (members.firstOrNull { it.you }?.name ?: "Arjun")
 
+    /** The patient's first name as the case knows it. */
+    var patientName by mutableStateOf("")
+        private set
+    val patientFirstName: String get() = (if (isPatient) onbFullName else patientName).trim().substringBefore(' ').ifEmpty { "Lakshmi" }
+
     fun relLabel(rel: String) = tx["r" + rel.replaceFirstChar { it.uppercase() }]
     fun roleLabel(r: String) = if (r == "approve") tx["canApprove"] else tx["canView"]
 
     // ---------- Medicines ----------
+    /**
+     * True once this case has documents on the backend. From then on every screen shows only what was
+     * read from them; the prototype's sample patient is shown (and labelled) only before any upload.
+     */
+    val hasCaseData get() = caseDocuments.isNotEmpty() || dischargeCardData != null || billData != null
+    val showingSample get() = !hasCaseData
+
+    /** Medicines from the Discharge Card. Sample doses only while nothing has been uploaded. */
     val doses: List<Dose>
         get() {
-            val cardMeds = dischargeCardData?.medicines
-            if (!cardMeds.isNullOrEmpty()) {
-                val times = listOf("Morning", "Afternoon", "Evening", "Night")
-                return cardMeds.mapIndexed { i, m ->
+            val card = dischargeCardData
+            if (card != null || hasCaseData) {
+                return card?.medicines.orEmpty().mapIndexed { i, m ->
                     val id = "med_$i"
-                    val time = if (m.schedule.isNotBlank()) m.schedule else times.getOrElse(i % times.size) { "Daily" }
-                    val what = if (m.dose.isNotBlank()) "${m.name} (${m.dose})" else m.name
-                    val why = if (m.purpose.isNotBlank()) m.purpose else (if (m.flag != null) "Needs confirmation: ${m.flag}" else "Prescribed medicine")
-                    Dose(id, m.name, time, what, why, taken[id] == true)
+                    val what = listOf(m.dose, m.days?.let { "$it days" }.orEmpty()).filter { it.isNotBlank() }.joinToString(" · ")
+                    Dose(id, m.name, m.schedule.ifBlank { tx["asDirected"] }, what, m.purpose, taken[id] == true)
                 }
             }
             val t = tx
@@ -987,7 +640,7 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
                 Dose(id, name, t.times[i], t[keys.first], t[keys.second], taken[id] == true)
             }
         }
-    val takenCount get() = taken.values.count { it }
+    val takenCount get() = doses.count { it.taken }
     fun toggleDose(id: String) {
         taken[id] = taken[id] != true
         if (isPatient) { stateDirty = true; send("Tablets") } // family sees today's tablets
@@ -1125,29 +778,20 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
         }
 
     // ---------- Bills ----------
+    /** Bill lines the AI marked as worth asking the billing desk about, each with a ready-to-send question. */
     val flags: List<Flag>
         get() {
-            val b = billData
-            if (b != null && b.items.isNotEmpty()) {
-                val reviewItems = b.items.filter { it.category == "unclear" || it.explanation.contains("review", ignoreCase = true) || it.explanation.contains("discrepancy", ignoreCase = true) }
-                if (reviewItems.isNotEmpty()) {
-                    val n = me
-                    return reviewItems.mapIndexed { idx, itm ->
-                        val fid = "bf_$idx"
-                        val amtFormatted = String.format(java.util.Locale.US, "₹%,.0f", itm.amount)
-                        Flag(
-                            fid,
-                            itm.description,
-                            amtFormatted,
-                            itm.explanation,
-                            "Flagged for billing review",
-                            "Hello, this is $n, family of Lakshmi. Could you please clarify the charge for ${itm.description} ($amtFormatted)? Thank you.",
-                        )
-                    }
-                }
-            }
             val t = tx
             val n = me
+            val patient = patientFirstName
+            if (hasCaseData) {
+                return billData?.items.orEmpty().filter { it.worthAsking }.map { item ->
+                    val amt = rupees(item.amount)
+                    val reason = item.askReason.ifBlank { t["askDefault"] }
+                    Flag("b${item.id}", item.description, amt, reason, item.explanation.ifBlank { reason },
+                        "Hello, this is $n, family of $patient. On the final bill, \"${item.description}\" is charged $amt. $reason Thank you.")
+                }
+            }
             return listOf(
                 Flag("f1", "Gloves, masks & kits ×38", "₹3,420", t["n1"], t["why1"],
                     "Hello, this is $n, family of Lakshmi (IP [NUMBER]). The final bill lists gloves, masks and kits 38 times for ₹3,420. Could you share the itemised list for these? Thank you."),
@@ -1160,12 +804,7 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
 
     val billRows: List<Pair<String, String>>
         get() {
-            val b = billData
-            if (b != null && b.items.isNotEmpty()) {
-                return b.items.map { itm ->
-                    itm.description to String.format(java.util.Locale.US, "₹%,.0f", itm.amount)
-                }
-            }
+            if (hasCaseData) return billData?.items.orEmpty().map { it.description to rupees(it.amount) }
             return listOf(
                 "Room · 5 days" to "₹42,500", "ICU · 1 day" to "₹22,000", "Doctor & specialist visits" to "₹18,000",
                 "Medicines & IV fluids" to "₹61,230", "Lab tests & scans" to "₹34,800",
@@ -1173,21 +812,30 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
         }
 
     val billTotalFormatted: String
-        get() {
-            val b = billData
-            return if (b != null && b.items.isNotEmpty()) {
-                String.format(java.util.Locale.US, "₹%,.0f", b.total)
-            } else {
-                "₹1,84,350"
-            }
-        }
+        get() = if (hasCaseData) rupees(billData?.total ?: 0.0) else "₹1,84,350"
+
+    /** The hospital named on the discharge summary, for the bill header. */
+    val hospitalName: String get() = dischargeCardData?.hospital.orEmpty()
 
     val unsent get() = flags.count { sent[it.id] != true }
 
     // ---------- Claim ----------
+    /** Claim papers: which ones have been uploaded and read. Sample checklist only before any upload. */
     val checklist: List<CheckItem>
         get() {
             val t = tx
+            if (hasCaseData) {
+                return CLAIM_PAPERS.map { (type, label, _) ->
+                    val docs = caseDocuments.filter { it.docType == type }
+                    val sub = when {
+                        docs.any { it.status == "ready" } -> t["paperReady"].replace("{n}", docs.count { it.status == "ready" }.toString())
+                        docs.any { it.status == "processing" } -> t["paperReading"]
+                        docs.isNotEmpty() -> t["paperFailed"]
+                        else -> t["paperMissing"]
+                    }
+                    CheckItem(t[label], sub, docs.any { it.status == "ready" })
+                }
+            }
             return listOf(
                 CheckItem(t["k1"], t["k1s"], true),
                 CheckItem(t["k2"], t["k2s"], true),
@@ -1197,7 +845,8 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
                 CheckItem(t["k6"], t["k6s"], true),
             )
         }
-    val missing get() = listOf(k4, k5).count { !it }
+    val missing get() =
+        if (hasCaseData) CLAIM_PAPERS.indices.count { CLAIM_PAPERS[it].third && !checklist[it].done } else listOf(k4, k5).count { !it }
     val curStep get() = if (approved) 3 else 2
     val track: List<Pair<String, String>>
         get() {
@@ -1216,7 +865,7 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
         get() {
             val t = tx
             val list = mutableListOf<Approval>()
-            if (medChange != "approved") list += Approval(t["apMed"], t["apMedSub"]) { ftab = FTab.Meds }
+            if (showingSample && medChange != "approved") list += Approval(t["apMed"], t["apMedSub"]) { ftab = FTab.Meds }
             if (!approved) list += Approval(t["apClaim"], if (missing > 0) "$missing ${t["apMissing"]}" else t["apAllIn"]) { sheet = Sheet.Approve }
             if (unsent > 0) list += Approval("$unsent ${t["apBills"]}", t["apBillsSub"]) { ftab = FTab.Bills }
             return list
@@ -1247,7 +896,8 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
         .put("sessionStale", sessionStale).put("pendingCheckin", pendingCheckin).put("stateDirty", stateDirty).put("sentNote", sentNote)
         .put("stage", when (stage) {
             Stage.App -> "App"
-            Stage.Onboarding, Stage.Processing -> "Onboarding"
+            Stage.Onboarding -> "Onboarding"
+            Stage.Processing -> "Processing" // resumes reading the papers; uploads already done are not repeated
             Stage.Lang -> "Lang"
             else -> "Welcome"
         })
@@ -1269,6 +919,9 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
             JSONObject().put("name", it.name).put("phone", it.phone).put("canApprove", it.canApprove)
         }))
         .put("caseId", caseId).put("askedCallPerm", askedCallPerm)
+        .put("uploadedDocs", JSONObject(uploadedDocs.toMap())).put("patientName", patientName)
+        // What the backend read from the documents, exactly as it sent it.
+        .put("cardJson", cardJson).put("billJson", billJson).put("coverageJson", coverageJson).put("documentsJson", documentsJson)
 
     /** Writes the current state to the phone. Also runs by itself shortly after anything changes. */
     fun save() {
@@ -1304,6 +957,13 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
             onbFamilyMembers.addAll(arr.mapObjects { OnboardingFamilyMember(it.getString("name"), it.getString("phone"), it.getBoolean("canApprove")) })
         }
         caseId = o.int("caseId"); askedCallPerm = o.optBoolean("askedCallPerm")
+        o.optJSONObject("uploadedDocs")?.let { m -> uploadedDocs.clear(); m.keys().forEach { uploadedDocs[it] = m.getInt(it) } }
+        patientName = o.optString("patientName")
+        // A piece that fails to parse is dropped on its own; the next refresh fetches it again.
+        cardJson = o.str("cardJson")?.also { runCatching { dischargeCardData = parseDischargeCard(JSONObject(it)) } }
+        billJson = o.str("billJson")?.also { runCatching { billData = parseBill(JSONObject(it)).takeIf { b -> b.items.isNotEmpty() } } }
+        coverageJson = o.str("coverageJson")?.also { runCatching { coverage = parseCoverage(JSONObject(it)) } }
+        documentsJson = o.str("documentsJson")?.also { runCatching { setDocuments(parseDocuments(JSONArray(it))) } }
         sessionStale = o.optBoolean("sessionStale", true); stateDirty = o.optBoolean("stateDirty")
 
         // Tablets taken and the check-in belong to one day; a new day starts fresh.
@@ -1317,6 +977,7 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
         stage = when (o.optString("stage")) {
             "App" -> Stage.App
             "Onboarding" -> Stage.Onboarding
+            "Processing" -> Stage.Processing
             "Lang" -> Stage.Lang
             else -> if (lang != null) Stage.Welcome else Stage.Lang
         }

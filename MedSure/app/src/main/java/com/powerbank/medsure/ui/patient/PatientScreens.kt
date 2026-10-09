@@ -105,8 +105,9 @@ fun TodayScreen(vm: MedSureViewModel) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 T(t["date"], 14, 600, Ms.Muted); Dot(); T(t["dayHome"], 14, 600, Ms.Muted)
             }
-            D(t["hello"] + "\nLakshmi", 40, lh = 1.05f, modifier = Modifier.padding(top = 4.dp))
+            D(t["hello"] + "\n" + vm.patientFirstName, 40, lh = 1.05f, modifier = Modifier.padding(top = 4.dp))
         }
+        SampleBanner(vm)
 
         MsCard(gap = 14.dp) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
@@ -114,20 +115,23 @@ fun TodayScreen(vm: MedSureViewModel) {
                     D(t["todaysMeds"], 22)
                     T(t["tapAfter"], 14, 400, Ms.Muted)
                 }
-                Row(verticalAlignment = Alignment.Bottom) { D("${vm.takenCount}", 30); D("/4", 18, color = Ms.Muted2, modifier = Modifier.padding(bottom = 3.dp)) }
+                Row(verticalAlignment = Alignment.Bottom) { D("${vm.takenCount}", 30); D("/${doses.size}", 18, color = Ms.Muted2, modifier = Modifier.padding(bottom = 3.dp)) }
             }
-            Row(
+            if (doses.isEmpty()) EmptyNote(if (vm.dischargeCardData == null) t["noCard"] else t["noMeds"])
+            // A blister row fits four; longer lists wrap onto more rows.
+            doses.chunked(4).forEach { row -> Row(
                 Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).background(Ms.Blister)
                     .border(1.dp, Ms.BlisterEdge, RoundedCornerShape(24.dp)).padding(14.dp),
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                doses.forEach { d ->
+                row.forEach { d ->
                     Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         Bubble(d.taken, "${d.time} ${d.name}", { vm.toggleDose(d.id) }, Modifier.fillMaxWidth())
-                        T(d.time, 12, 700, align = TextAlign.Center)
+                        T(if (vm.showingSample) d.time else d.name.substringBefore(' ').take(10), 12, 700, align = TextAlign.Center)
                     }
                 }
-            }
+                repeat(4 - row.size) { Spacer(Modifier.weight(1f)) }
+            } }
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 doses.forEach { d ->
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
@@ -187,18 +191,23 @@ fun TodayScreen(vm: MedSureViewModel) {
             }
         }
 
-        MsCard {
+        val followUp = vm.dischargeCardData?.followUps?.firstOrNull()
+        if (vm.showingSample || followUp != null) MsCard {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
                 Column(
                     Modifier.size(58.dp, 64.dp).clip(RoundedCornerShape(14.dp)).background(Ms.Ink),
                     horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center,
                 ) {
-                    T(t["mon"], 11, 700, Ms.Paper, spacing = 0.06f)
-                    D("5", 26, color = Ms.Paper, lh = 1f)
+                    if (followUp == null) {
+                        T(t["mon"], 11, 700, Ms.Paper, spacing = 0.06f)
+                        D("5", 26, color = Ms.Paper, lh = 1f)
+                    } else {
+                        Ico(LineIcons.Calendar, Ms.Paper, 26.dp)
+                    }
                 }
                 Column(Modifier.weight(1f)) {
-                    T(t["followTitle"], 16, 700)
-                    T(t["followSub"], 14, 400, Ms.Muted)
+                    T(followUp?.text ?: t["followTitle"], 16, 700)
+                    T(followUp?.let { it.sub.ifBlank { pageRef(vm, it.sourcePage) } } ?: t["followSub"], 14, 400, Ms.Muted)
                 }
             }
         }
@@ -221,7 +230,14 @@ fun CareScreen(vm: MedSureViewModel) {
         Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             tabs.forEach { (id, label) -> Chip(label, vm.care == id) { vm.care = id } }
         }
-        MsCard(gap = 12.dp) {
+        SampleBanner(vm)
+        val card = vm.dischargeCardData
+        if (!vm.showingSample && card == null) {
+            MsCard(gap = 12.dp) {
+                T(if (vm.caseDocuments.any { it.status == "processing" }) t["cardReading"] else t["noCard"], 16, 400, lh = 1.5f)
+                AddPapersButton(vm)
+            }
+        } else if (card == null) MsCard(gap = 12.dp) {
             when (vm.care) {
                 "watch" -> {
                     D(t["cWatch"], 24)
@@ -258,6 +274,83 @@ fun CareScreen(vm: MedSureViewModel) {
                     T("${t["src"]} 1", 13, 400, Ms.Muted)
                 }
             }
+        } else MsCard(gap = 12.dp) {
+            when (vm.care) {
+                "watch" -> {
+                    D(t["cWatch"], 24)
+                    if (card.warningSigns.isEmpty()) EmptyNote(t["noWatch"])
+                    card.warningSigns.forEach { w ->
+                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Ico(LineIcons.Alert, Ms.Warn)
+                            Column {
+                                T(w.text, 17, 400, lh = 1.4f)
+                                T(pageRef(vm, w.sourcePage), 12, 400, Ms.Muted)
+                            }
+                        }
+                    }
+                    T(t["call108line"], 15, 600, Color.White, Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Ms.Red).padding(horizontal = 14.dp, vertical = 12.dp))
+                    if (card.precautions.isNotEmpty()) {
+                        D(t["precautions"], 20, modifier = Modifier.padding(top = 6.dp))
+                        card.precautions.forEach { p ->
+                            Column {
+                                T("• ${p.text}", 16, 400, lh = 1.45f)
+                                T(pageRef(vm, p.sourcePage), 12, 400, Ms.Muted)
+                            }
+                        }
+                    }
+                }
+                "meds" -> {
+                    D(t["cMeds"], 24)
+                    if (card.medicines.isEmpty()) EmptyNote(t["noMeds"])
+                    card.medicines.forEach { m ->
+                        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            T(listOf(m.name, m.dose).filter { it.isNotBlank() }.joinToString(" "), 16, 700)
+                            val how = listOf(m.schedule, m.days?.let { "$it days" }.orEmpty()).filter { it.isNotBlank() }.joinToString(" · ")
+                            if (how.isNotBlank()) T(how, 15, 600, Ms.Text3)
+                            if (m.purpose.isNotBlank()) T(m.purpose, 15, 400, Ms.Muted, lh = 1.4f)
+                            T(pageRef(vm, m.sourcePage), 12, 400, Ms.Muted)
+                        }
+                    }
+                }
+                "visit" -> {
+                    D(t["cVisit"], 24)
+                    if (card.followUps.isEmpty()) EmptyNote(t["noVisit"])
+                    card.followUps.forEach { f ->
+                        Column {
+                            T(f.text, 18, 600, lh = 1.4f)
+                            if (f.sub.isNotBlank()) T(f.sub, 16, 400, Ms.Text3)
+                            T(pageRef(vm, f.sourcePage), 12, 400, Ms.Muted)
+                        }
+                    }
+                }
+                else -> {
+                    D(t["cHappened"], 24)
+                    T(card.diagnosisName, 20, 700, lh = 1.3f)
+                    if (card.diagnosisPlain.isNotBlank()) T(card.diagnosisPlain, 17, 400, lh = 1.5f)
+                    if (card.summary.isNotBlank()) T(card.summary, 17, 400, Ms.Text3, lh = 1.55f)
+                    val stay = listOf(card.admissionDate, card.dischargeDate).filter { it.isNotBlank() }.joinToString(" → ")
+                    listOf(card.hospital, card.doctor, stay).filter { it.isNotBlank() }.forEach { T(it, 14, 600, Ms.Muted) }
+                    if (card.otherDiagnoses.isNotEmpty()) {
+                        T(t["otherDiag"], 14, 800, Ms.Muted, Modifier.padding(top = 4.dp))
+                        card.otherDiagnoses.forEach { T("• ${it.text}", 15, 400, lh = 1.4f) }
+                    }
+                    if (card.labValues.isNotEmpty()) {
+                        D(t["tests"], 20, modifier = Modifier.padding(top = 6.dp))
+                        card.labValues.forEach { l ->
+                            val color = when (l.status) { "high", "low" -> Ms.AmberText; "normal" -> Ms.GreenFg; else -> Ms.Muted }
+                            Column {
+                                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                    T(l.name, 15, 700, modifier = Modifier.weight(1f))
+                                    T("${l.value} ${l.unit}".trim(), 15, 700, color)
+                                }
+                                if (l.plain.isNotBlank()) T(l.plain, 14, 400, Ms.Muted, lh = 1.4f)
+                            }
+                        }
+                    }
+                    T(pageRef(vm, card.diagnosisPage), 13, 400, Ms.Muted)
+                }
+            }
+            T(card.disclaimer, 12, 400, Ms.Muted, lh = 1.4f)
         }
         MsButton(
             if (vm.reading) t["reading"] else t["readAloud"],

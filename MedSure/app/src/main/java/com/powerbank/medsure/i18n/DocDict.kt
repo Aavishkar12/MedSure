@@ -1,0 +1,58 @@
+package com.powerbank.medsure.i18n
+
+/**
+ * Copy for screens that show what was read from the patient's own documents. English only for now:
+ * Tx falls back to English key by key, and the AI writes its explanations in English.
+ */
+object DocDict {
+    val en = mapOf(
+        "sampleTitle" to "This is sample data",
+        "sampleBody" to "Add your discharge summary, bill and insurance policy to see your own details here.",
+        "addPapers" to "Add papers",
+        "addingPapers" to "Reading your papers…",
+        "noCaseYet" to "Your family member hasn't added you to their case yet.",
+        "asDirected" to "As directed",
+        "noMeds" to "No medicines were found in your discharge papers.",
+        "noCard" to "We haven't read a discharge summary yet.",
+        "cardReading" to "Your papers are being read. This usually takes under a minute.",
+        "whatHappened" to "What happened",
+        "otherDiag" to "Also noted",
+        "tests" to "Test results",
+        "precautions" to "Take care",
+        "noWatch" to "Your papers don't list warning signs. If you feel worse, call your doctor.",
+        "noVisit" to "Your papers don't mention a follow-up visit.",
+        "page" to "Page",
+        "fromPapers" to "From your papers",
+        "stayed" to "In hospital",
+        "noBill" to "No bill has been read yet. Add the hospital's final bill.",
+        "noFlags" to "Nothing on this bill looks unusual.",
+        "askDefault" to "Could you explain this charge?",
+        "cpDischarge" to "Discharge summary",
+        "cpBill" to "Final itemised bill",
+        "cpPolicy" to "Insurance policy",
+        "cpId" to "Patient ID proof",
+        "cpLab" to "Lab & scan reports",
+        "cpRx" to "Prescriptions",
+        "paperReady" to "Uploaded and read ({n})",
+        "paperReading" to "Being read…",
+        "paperFailed" to "Couldn't be read. Add a clearer copy.",
+        "paperMissing" to "Not added yet",
+        "covTitle" to "What insurance may pay",
+        "covIntro" to "We compared each line of the bill with your policy.",
+        "covNeedBoth" to "Add both the hospital bill and the insurance policy to see what your policy is likely to pay.",
+        "covRun" to "Check my bill against my policy",
+        "covRerun" to "Check again",
+        "covRunning" to "Comparing your bill with your policy…",
+        "covBilled" to "Billed",
+        "covClaimable" to "Likely claimable",
+        "covYouPay" to "You may pay",
+        "covCopay" to "co-payment",
+        "covCovered" to "Covered",
+        "covPartly" to "Partly covered",
+        "covNot" to "Not covered",
+        "covUnclear" to "Ask insurer",
+        "covClaimLine" to "Claimable",
+        "covPolicySays" to "Policy says",
+        "covBasic" to "Basic check only: AI review was not available.",
+    )
+}

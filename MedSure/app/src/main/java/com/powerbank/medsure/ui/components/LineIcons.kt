@@ -36,6 +36,8 @@ object LineIcons {
 
     val Check by lazy { icon("check", "M20 6 L9 17 L4 12") }
     val ChevronRight by lazy { icon("chev-r", "M9 18 L15 12 L9 6") }
+    val ChevronDown by lazy { icon("chev-d", "M6 9 L12 15 L18 9") }
+    val AlertCircle by lazy { icon("alert-circle", "M12 2a10 10 0 1 0 0 20a10 10 0 1 0 0-20z", "M12 8 L12 12", "M12 16 L12.01 16") }
     val ChevronLeft by lazy { icon("chev-l", "M15 18 L9 12 L15 6") }
     val Close by lazy { icon("x", "M18 6 L6 18", "M6 6 L18 18") }
     val Pill by lazy {
