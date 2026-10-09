@@ -25,6 +25,7 @@ object PushBus {
 /**
  * Receives pushes from the backend and draws the notification.
  * data: title, body, case_id, kind, ref_id, and for a flagged check-in call_name + call_phone.
+ * A push without a body is a silent update: it refreshes the app and shows nothing.
  */
 class PushService : FirebaseMessagingService() {
 
@@ -37,8 +38,9 @@ class PushService : FirebaseMessagingService() {
 
     override fun onMessageReceived(message: RemoteMessage) {
         val data = message.data
-        val body = data["body"] ?: message.notification?.body ?: return
-        PushBus.events.tryEmit(data)
+        PushBus.events.tryEmit(data) // open screens refresh on every push, including silent ones
+        val body = (data["body"] ?: message.notification?.body).orEmpty()
+        if (body.isEmpty()) return // silent update: nothing to show
 
         val manager = getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(NotificationChannel(CHANNEL, "MedSure updates", NotificationManager.IMPORTANCE_HIGH))

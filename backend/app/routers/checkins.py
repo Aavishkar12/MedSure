@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
@@ -37,6 +37,34 @@ def create_checkin(
         # call_phone lets the family's notification offer a "Call" button for whoever checked in.
         extra = {"severity": "urgent" if urgent else "attention", "call_name": user.name, "call_phone": user.phone or ""}
         notify_case(session, case_id, "MedSure", body, "checkin", checkin.id, exclude_user_id=user.id, extra=extra)
+    else:
+        _silent_update(session, checkin, user)
+    return checkin
+
+
+def _silent_update(session: Session, checkin: Checkin, user: User) -> None:
+    """Tell the rest of the family's phones to refresh, without showing a notification."""
+    notify_case(session, checkin.case_id, "", "", "checkin", checkin.id, exclude_user_id=user.id)
+
+
+class CheckinNote(BaseModel):
+    note: str
+
+
+@router.patch("/checkins/{checkin_id}", response_model=Checkin)
+def update_checkin_note(
+    checkin_id: int, body: CheckinNote, user: User = Depends(current_user), session: Session = Depends(get_session)
+):
+    """Add or change the free-text note on a check-in. The note never affects the flags."""
+    checkin = session.get(Checkin, checkin_id)
+    if not checkin:
+        raise HTTPException(404, "Check-in not found")
+    require_member(session, checkin.case_id, user)
+    checkin.answers = {**checkin.answers, "note": body.note.strip()[:500]}
+    session.add(checkin)
+    session.commit()
+    session.refresh(checkin)
+    _silent_update(session, checkin, user)
     return checkin
 
 

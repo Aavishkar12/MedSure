@@ -123,6 +123,14 @@ class Checkin(SQLModel, table=True):
     created_at: datetime = Field(default_factory=now)
 
 
+class CaseState(SQLModel, table=True):
+    """Small state every phone on a case shares: tablets taken today, status of a medicine change."""
+
+    case_id: int = Field(foreign_key="case.id", primary_key=True)
+    data: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    updated_at: datetime = Field(default_factory=now)
+
+
 class TimelineEvent(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     case_id: int = Field(foreign_key="case.id", index=True)

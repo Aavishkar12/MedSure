@@ -29,8 +29,11 @@ object Backend {
         auth.signOut()
     }
 
+    /** A blank name is not sent, so the backend keeps the one it already has. */
     suspend fun saveProfile(name: String, phone: String, email: String) {
-        request("PATCH", "/me", JSONObject().put("name", name).put("phone", phone).put("email", email))
+        val body = JSONObject().put("phone", phone).put("email", email)
+        if (name.isNotBlank()) body.put("name", name)
+        request("PATCH", "/me", body)
     }
 
     /** Registers this phone for push notifications. Call after sign-in and whenever the token changes. */
@@ -38,10 +41,32 @@ object Backend {
         request("POST", "/devices", JSONObject().put("token", token ?: pushToken()))
     }
 
-    /** Id of the first case this user belongs to, or null if they are not on one yet. */
-    suspend fun firstCaseId(): Int? {
-        val cases = JSONArray(request("GET", "/cases"))
-        return if (cases.length() > 0) cases.getJSONObject(0).getInt("id") else null
+    /** The patient's own case, or for family the newest case they were added to. Null if there is none yet. */
+    suspend fun myCaseId(asPatient: Boolean): Int? {
+        val cases = JSONArray(request("GET", "/cases?as_patient=$asPatient"))
+        return if (cases.length() > 0) cases.getJSONObject(cases.length() - 1).getInt("id") else null
+    }
+
+    class RemoteMember(val name: String, val relation: String, val canApprove: Boolean, val phone: String, val you: Boolean)
+
+    /** Everyone on the case, including people invited who have not signed in yet. */
+    suspend fun members(caseId: Int): List<RemoteMember> {
+        val all = JSONArray(request("GET", "/cases/$caseId/members"))
+        return List(all.length()) {
+            val m = all.getJSONObject(it)
+            RemoteMember(m.optString("name"), m.optString("relation"), m.optBoolean("can_approve"), if (m.isNull("phone")) "" else m.getString("phone"), m.optBoolean("you"))
+        }
+    }
+
+    /** Shared between the phones on a case: taken (dose id -> true), taken_day, med_change. */
+    suspend fun sharedState(caseId: Int): JSONObject = JSONObject(request("GET", "/cases/$caseId/state"))
+
+    suspend fun sendTaken(caseId: Int, taken: Map<String, Boolean>, day: String) {
+        request("PATCH", "/cases/$caseId/state", JSONObject().put("taken", JSONObject(taken)).put("taken_day", day))
+    }
+
+    suspend fun sendMedChange(caseId: Int, status: String) {
+        request("PATCH", "/cases/$caseId/state", JSONObject().put("med_change", status))
     }
 
     suspend fun createCase(patientName: String, relation: String): Int =
@@ -56,17 +81,34 @@ object Backend {
     }
 
     /** level: 0 on track, 1 keep watch, 2 needs help now. Family is notified when it is above 0. */
-    suspend fun checkin(caseId: Int, levels: List<Int>, note: String) {
+    suspend fun checkin(caseId: Int, levels: List<Int>, note: String): Int {
         val answers = JSONObject().put("level", levels.maxOrNull() ?: 0).put("levels", JSONArray(levels)).put("note", note)
-        request("POST", "/cases/$caseId/checkins", JSONObject().put("answers", answers))
+        return JSONObject(request("POST", "/cases/$caseId/checkins", JSONObject().put("answers", answers))).getInt("id")
     }
 
-    /** Answer levels of the most recent check-in on this case, or null if there is none yet. */
-    suspend fun latestCheckinLevels(caseId: Int): List<Int>? {
+    /** Attaches or changes the note on a check-in that was already sent. */
+    suspend fun updateCheckinNote(checkinId: Int, note: String) {
+        request("PATCH", "/checkins/$checkinId", JSONObject().put("note", note))
+    }
+
+    /** A check-in as stored on the backend. */
+    class RemoteCheckin(val id: Int, val levels: List<Int>, val note: String, val createdAt: String) {
+        /** True when it was made today, in this phone's time zone. The server stores UTC. */
+        val isToday: Boolean
+            get() = runCatching {
+                val utc = java.time.LocalDateTime.parse(createdAt.removeSuffix("Z").substringBefore('+'))
+                utc.atOffset(java.time.ZoneOffset.UTC).atZoneSameInstant(java.time.ZoneId.systemDefault()).toLocalDate() == java.time.LocalDate.now()
+            }.getOrDefault(true)
+    }
+
+    /** The most recent check-in on this case, or null if there is none yet. */
+    suspend fun latestCheckin(caseId: Int): RemoteCheckin? {
         val all = JSONArray(request("GET", "/cases/$caseId/checkins"))
         if (all.length() == 0) return null
-        val levels = all.getJSONObject(all.length() - 1).getJSONObject("answers").optJSONArray("levels") ?: return null
-        return List(levels.length()) { levels.getInt(it) }
+        val last = all.getJSONObject(all.length() - 1)
+        val answers = last.getJSONObject("answers")
+        val levels = answers.optJSONArray("levels") ?: return null
+        return RemoteCheckin(last.getInt("id"), List(levels.length()) { levels.getInt(it) }, answers.optString("note"), last.getString("created_at"))
     }
 
     private suspend fun pushToken(): String = FirebaseMessaging.getInstance().token.await()

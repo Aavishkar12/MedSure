@@ -46,9 +46,16 @@ def create_case(body: CaseCreate, user: User = Depends(current_user), session: S
 
 
 @router.get("/cases", response_model=list[Case])
-def list_cases(user: User = Depends(current_user), session: Session = Depends(get_session)):
+def list_cases(
+    as_patient: bool | None = None, user: User = Depends(current_user), session: Session = Depends(get_session)
+):
+    """Cases this user is on, oldest first. as_patient=true: only their own case; false: only cases they help with."""
     stmt = select(Case).join(CaseMember, CaseMember.case_id == Case.id).where(CaseMember.user_id == user.id)
-    return session.exec(stmt).all()
+    if as_patient is True:
+        stmt = stmt.where(CaseMember.relation == "self")
+    elif as_patient is False:
+        stmt = stmt.where(CaseMember.relation != "self")
+    return session.exec(stmt.order_by(Case.id)).all()
 
 
 @router.get("/cases/{case_id}", response_model=Case)
@@ -91,7 +98,16 @@ def add_member(
     matches = ([User.phone == phone] if phone else []) + ([User.email == email] if email else [])
     existing = session.exec(select(User).where(or_(*matches))).first() if matches else None
     if existing:
-        if not session.get(CaseMember, (case_id, existing.id)):
+        if not existing.name:  # family have no name field at sign-in; use what the inviter called them
+            existing.name = body.name.strip()
+            session.add(existing)
+        member = session.get(CaseMember, (case_id, existing.id))
+        if member:
+            if member.can_approve == body.can_approve or member.relation == "self":
+                return list_members(case_id, user, session)  # nothing to change
+            member.can_approve = body.can_approve
+            session.add(member)
+        else:
             session.add(
                 CaseMember(case_id=case_id, user_id=existing.id, relation=body.relation, can_approve=body.can_approve)
             )
