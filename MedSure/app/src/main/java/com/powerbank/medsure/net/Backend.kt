@@ -1,5 +1,7 @@
 package com.powerbank.medsure.net
 
+import android.content.Context
+import android.net.Uri
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.messaging.FirebaseMessaging
 import com.powerbank.medsure.BuildConfig
@@ -8,6 +10,8 @@ import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
+import java.io.DataOutputStream
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
@@ -68,6 +72,108 @@ object Backend {
         val levels = all.getJSONObject(all.length() - 1).getJSONObject("answers").optJSONArray("levels") ?: return null
         return List(levels.length()) { levels.getInt(it) }
     }
+
+    // ==================== DOCUMENT & LLM API CALLS ====================
+
+    /**
+     * Upload a document via multipart/form-data.
+     * Either context + uri OR ocrText must be provided.
+     */
+    suspend fun uploadDocument(
+        caseId: Int,
+        docType: String,
+        context: Context? = null,
+        uri: Uri? = null,
+        filename: String? = null,
+        ocrText: String? = null,
+    ): JSONObject {
+        val token = auth.currentUser?.getIdToken(false)?.await()?.token ?: throw IOException("Not signed in")
+        val url = baseUrl() + "/cases/$caseId/documents"
+        val boundary = "==MedSureBoundary" + System.currentTimeMillis() + "=="
+        val lineEnd = "\r\n"
+
+        return withContext(Dispatchers.IO) {
+            val conn = URL(url).openConnection() as HttpURLConnection
+            try {
+                conn.requestMethod = "POST"
+                conn.connectTimeout = 30_000
+                conn.readTimeout = 60_000
+                conn.doOutput = true
+                conn.setRequestProperty("Authorization", "Bearer $token")
+                conn.setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
+
+                DataOutputStream(conn.outputStream).use { dos ->
+                    // Form field: doc_type
+                    dos.writeBytes("--$boundary$lineEnd")
+                    dos.writeBytes("Content-Disposition: form-data; name=\"doc_type\"$lineEnd$lineEnd")
+                    dos.writeBytes(docType + lineEnd)
+
+                    // Optional form field: ocr_text
+                    if (!ocrText.isNullOrBlank()) {
+                        dos.writeBytes("--$boundary$lineEnd")
+                        dos.writeBytes("Content-Disposition: form-data; name=\"ocr_text\"$lineEnd$lineEnd")
+                        dos.write(ocrText.toByteArray(Charsets.UTF_8))
+                        dos.writeBytes(lineEnd)
+                    }
+
+                    // Optional file content
+                    if (context != null && uri != null) {
+                        val fn = filename ?: "document.pdf"
+                        dos.writeBytes("--$boundary$lineEnd")
+                        dos.writeBytes("Content-Disposition: form-data; name=\"file\"; filename=\"$fn\"$lineEnd")
+                        dos.writeBytes("Content-Type: application/octet-stream$lineEnd$lineEnd")
+                        context.contentResolver.openInputStream(uri)?.use { input ->
+                            val buffer = ByteArray(8192)
+                            var read: Int
+                            while (input.read(buffer).also { read = it } != -1) {
+                                dos.write(buffer, 0, read)
+                            }
+                        }
+                        dos.writeBytes(lineEnd)
+                    }
+
+                    // End of multipart
+                    dos.writeBytes("--$boundary--$lineEnd")
+                    dos.flush()
+                }
+
+                val code = conn.responseCode
+                val text = (if (code in 200..299) conn.inputStream else conn.errorStream)
+                    ?.bufferedReader()?.use { it.readText() }.orEmpty()
+                if (code !in 200..299) throw IOException("Upload failed ($code): ${text.take(200)}")
+                JSONObject(text)
+            } finally {
+                conn.disconnect()
+            }
+        }
+    }
+
+    suspend fun getDocumentStatus(docId: Int): JSONObject {
+        return JSONObject(request("GET", "/documents/$docId"))
+    }
+
+    suspend fun listDocuments(caseId: Int): JSONArray {
+        return JSONArray(request("GET", "/cases/$caseId/documents"))
+    }
+
+    suspend fun getDischargeCard(caseId: Int): JSONObject? {
+        return try {
+            JSONObject(request("GET", "/cases/$caseId/discharge-card"))
+        } catch (e: IOException) {
+            if (e.message?.contains("404") == true) null else throw e
+        }
+    }
+
+    suspend fun getBill(caseId: Int): JSONObject {
+        return JSONObject(request("GET", "/cases/$caseId/bill"))
+    }
+
+    suspend fun askAboutDocuments(caseId: Int, question: String): JSONObject {
+        val body = JSONObject().put("question", question)
+        return JSONObject(request("POST", "/cases/$caseId/ask", body))
+    }
+
+    // ==================== NETWORKING INTERNALS ====================
 
     private suspend fun pushToken(): String = FirebaseMessaging.getInstance().token.await()
 

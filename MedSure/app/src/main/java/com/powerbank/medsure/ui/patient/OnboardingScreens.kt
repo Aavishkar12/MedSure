@@ -632,7 +632,7 @@ private fun UploadOptionCard(
 }
 
 @Composable
-private fun DocumentRow(doc: UploadedDoc, onRemove: () -> Unit) {
+fun DocumentRow(doc: UploadedDoc, onRemove: () -> Unit) {
     val shape = RoundedCornerShape(16.dp)
     Row(
         Modifier.fillMaxWidth().clip(shape).background(Ms.White).border(1.dp, Ms.Line, shape)

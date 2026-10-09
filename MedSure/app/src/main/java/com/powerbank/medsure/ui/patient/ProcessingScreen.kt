@@ -61,42 +61,39 @@ fun ProcessingScreen(vm: MedSureViewModel) {
     var completedSteps by remember { mutableIntStateOf(0) }
     var targetProgress by remember { mutableFloatStateOf(0.08f) }
 
-    // Simulated for demo. No real processing happens.
+    // Real processing pipeline with visual progress synchronization
     LaunchedEffect(Unit) {
-        // Step 1: Securing your documents (0ms - 1100ms)
+        // Step 1: Securing your profile
         activeStep = 0
-        targetProgress = 0.28f
-        delay(650)
+        targetProgress = 0.25f
         completedPills = 1
-        delay(450)
-        completedSteps = 1
 
-        // Step 2: Reading your discharge papers (1100ms - 2200ms)
-        activeStep = 1
-        targetProgress = 0.52f
-        delay(400)
-        completedPills = 2
-        delay(700)
-        completedSteps = 2
+        // Execute real backend upload & Groq LLM extraction pipeline
+        vm.processOnboardingDocs(context) { stepIdx ->
+            activeStep = stepIdx
+            when (stepIdx) {
+                1 -> {
+                    targetProgress = 0.50f
+                    completedPills = 2
+                    completedSteps = 1
+                }
+                2 -> {
+                    targetProgress = 0.75f
+                    completedPills = 3
+                    completedSteps = 2
+                }
+                3 -> {
+                    targetProgress = 0.95f
+                    completedPills = 4
+                    completedSteps = 3
+                }
+            }
+        }
 
-        // Step 3: Setting up your medicine reminders (2200ms - 3300ms)
-        activeStep = 2
-        targetProgress = 0.76f
-        delay(300)
-        completedPills = 3
-        delay(800)
-        completedSteps = 3
-
-        // Step 4: Preparing your home screen (3300ms - 4400ms)
-        activeStep = 3
+        // Step 4: Final completion & navigate to app
         targetProgress = 1.0f
-        delay(250)
-        completedPills = 4
-        delay(850)
-        completedSteps = 4
         completedPills = 5
-
-        // Hold for 400ms upon final completion, then navigate to Patient Home
+        completedSteps = 4
         delay(400)
         vm.completeProcessing()
     }
