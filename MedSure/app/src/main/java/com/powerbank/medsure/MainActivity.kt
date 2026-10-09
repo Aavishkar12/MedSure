@@ -95,10 +95,14 @@ fun MedSureApp(vm: MedSureViewModel) {
                 }
             }
             SheetHost(vm)
+            if (vm.showExtractionDebug) {
+                com.powerbank.medsure.ui.debug.ExtractedDataDialog(vm)
+            }
         }
     }
-    BackHandler(enabled = vm.sheet != null || vm.overlay != null || vm.stage == Stage.Details || vm.stage == Stage.Otp || vm.stage == Stage.Welcome || vm.stage == Stage.Onboarding || vm.stage == Stage.Processing) {
+    BackHandler(enabled = vm.showExtractionDebug || vm.sheet != null || vm.overlay != null || vm.stage == Stage.Details || vm.stage == Stage.Otp || vm.stage == Stage.Welcome || vm.stage == Stage.Onboarding || vm.stage == Stage.Processing) {
         when {
+            vm.showExtractionDebug -> vm.showExtractionDebug = false
             vm.sheet != null -> vm.sheet = null
             vm.overlay != null -> vm.closeOverlay()
             vm.stage == Stage.Processing -> { /* Disabled on processing screen */ }

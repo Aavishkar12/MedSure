@@ -94,6 +94,18 @@ fun SettingsScreen(vm: MedSureViewModel) {
             PlusCard(vm)
         }
 
+        Caps("DEVELOPER DEBUG")
+        MsCard(onClick = { vm.showExtractionDebug = true }) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                Ico(LineIcons.FileText, Ms.Ink)
+                Column(Modifier.weight(1f)) {
+                    T("Pipeline Extractions", 16, 700)
+                    T("Inspect structured JSON output & confidence", 13, 400, Ms.Muted)
+                }
+                Ico(LineIcons.ChevronRight, Ms.Ink, 18.dp)
+            }
+        }
+
         MsButton(
             t["logout"], BtnKind.Ghost, Modifier.fillMaxWidth().padding(top = 6.dp), icon = LineIcons.LogOut,
             borderColor = Ms.Red, textColor = Ms.Red,
