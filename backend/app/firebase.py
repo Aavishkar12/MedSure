@@ -31,7 +31,12 @@ def _app():
         # stay off; everything else (documents, AI, dev sign-in) must keep working.
         log.warning(f"FIREBASE_CREDENTIALS file not found: {raw}. Push and Firebase sign-in are disabled.")
         return None
-    cred = credentials.Certificate(json.loads(raw) if raw.startswith("{") else raw)
+    try:
+        cred = credentials.Certificate(json.loads(raw) if raw.startswith("{") else raw)
+    except ValueError as e:
+        # Usually the Android app's google-services.json saved here by mistake: that is a different file.
+        log.warning(f"FIREBASE_CREDENTIALS is not a service-account key ({e}). Push and Firebase sign-in are disabled.")
+        return None
     return firebase_admin.initialize_app(cred)
 
 
