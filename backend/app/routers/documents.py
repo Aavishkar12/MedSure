@@ -209,6 +209,17 @@ def _policy_from_rules(fields: dict) -> dict:
 BILL_COLUMNS = ("description", "amount", "explanation", "worth_asking", "ask_reason", "concept")
 
 
+def _with_quantity(description: str, quantity, unit_price) -> str:
+    """"Room rent" -> "Room rent (5 x Rs 6000)" when the bill shows several units at a rate."""
+    try:
+        qty, rate = float(quantity), float(unit_price)
+    except (TypeError, ValueError):
+        return description
+    if qty <= 1 or rate <= 0 or " x Rs " in description:
+        return description
+    return f"{description} ({qty:g} x Rs {rate:g})"
+
+
 def _read(session: Session, doc: Document, text: str, method: str, envelope) -> None:
     """Turns the document's text into its structured rows: Discharge Card, bill lines or policy terms."""
     ai = bool(settings.groq_api_key.strip())
@@ -232,9 +243,11 @@ def _read(session: Session, doc: Document, text: str, method: str, envelope) -> 
             items = [i.model_dump(include=set(BILL_COLUMNS)) for i in prev]
         elif ai:
             items = llm.extract_bill(*_llm_inputs(doc, text, method))
+            for item in items:
+                item["description"] = _with_quantity(item["description"], item.get("quantity"), item.get("unit_price"))
         else:
             items = [
-                {"description": li["description"], "amount": li["amount"]}
+                {"description": _with_quantity(li["description"], li.get("qty"), li.get("rate")), "amount": li["amount"]}
                 for li in fields.get("line_items", []) if li.get("description") and li.get("amount") is not None
             ]
             if not items:

@@ -3,6 +3,7 @@
 import base64
 import json
 import logging
+import time
 from pathlib import Path
 
 from groq import APIConnectionError, APIError, AuthenticationError, Groq, RateLimitError
@@ -91,18 +92,46 @@ def _clean_json_markdown(text: str) -> str:
     return text
 
 
+# Groq's free tier allows a few thousand tokens a minute, which three documents in a row exceed.
+# Documents are read in the background, so waiting for the limit to reset is better than failing.
+RATE_LIMIT_ATTEMPTS = 5
+RATE_LIMIT_MAX_WAIT = 30.0
+
+
+def _retry_after(error: RateLimitError) -> float:
+    """Seconds Groq asks us to wait, from the retry-after header."""
+    try:
+        seconds = float(error.response.headers.get("retry-after", ""))
+    except (AttributeError, TypeError, ValueError):
+        seconds = 5.0
+    return min(max(seconds, 1.0), RATE_LIMIT_MAX_WAIT)
+
+
 def _chat(**kwargs) -> str:
     if kwargs.get("model", "").startswith("openai/gpt-oss"):  # reasoning models; keep them quick
         kwargs["reasoning_effort"] = "low"
+    for attempt in range(1, RATE_LIMIT_ATTEMPTS + 1):
+        try:
+            return _chat_once(**kwargs)
+        except RateLimitError as e:
+            if attempt == RATE_LIMIT_ATTEMPTS:
+                logger.warning(f"Groq rate limit, giving up after {attempt} attempts: {e}")
+                raise LLMError("The AI service is busy right now. Please try again in a minute.") from e
+            wait = _retry_after(e)
+            logger.info(f"Groq rate limit; waiting {wait:.0f}s (attempt {attempt} of {RATE_LIMIT_ATTEMPTS})")
+            time.sleep(wait)
+    raise LLMError("The AI service is busy right now. Please try again in a minute.")  # not reached
+
+
+def _chat_once(**kwargs) -> str:
     try:
         resp = _groq().chat.completions.create(**kwargs)
         return resp.choices[0].message.content or ""
+    except RateLimitError:
+        raise  # _chat waits and retries
     except AuthenticationError as e:
         logger.error(f"Groq authentication error: {e}")
         raise LLMError("AI service authentication failed. Please check the backend GROQ_API_KEY configuration.") from e
-    except RateLimitError as e:
-        logger.warning(f"Groq rate limit: {e}")
-        raise LLMError("The AI service is busy right now. Please try again in a minute.") from e
     except APIConnectionError as e:
         logger.error(f"Groq connection error: {e}")
         raise LLMError("Could not connect to the AI service. Please check network connectivity.") from e

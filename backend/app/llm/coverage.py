@@ -8,6 +8,7 @@ model's arithmetic or invention. The result is an estimate; the insurer decides.
 
 import json
 import logging
+import re
 from typing import Literal, Optional
 
 from pydantic import BaseModel, ValidationError
@@ -34,13 +35,15 @@ Rules:
     deduction) means only part of it is payable. Set claimable_amount to the payable part.
   not_covered: the policy excludes it or lists it as non-payable.
   unclear: the policy does not say enough to decide.
+- A line may end with its quantity and rate, e.g. "(5 x Rs 6000)" for 5 days at Rs 6,000. A per-day
+  or per-unit limit applies to each unit: a Rs 4,000 per day limit on that line allows 5 x 4,000.
 - claimable_amount is in rupees and never more than the line amount. Do NOT apply the co-payment or
   the sum insured; that is done separately.
 - reason: one plain sentence a non-expert understands, naming the policy rule you relied on.
-- policy_quote: the exact words from the policy text that support the decision, copied word for
-  word, at most 25 words. Empty string if you relied only on the structured terms.
+- policy_quote: whenever policy text is given, the exact words from it that support the decision,
+  copied word for word from one sentence, at most 25 words, with no "..." and nothing added.
 - notes: up to four short, plain points that affect the whole claim (waiting periods, pre-authorisation,
-  claim deadline, documents needed). Only what the policy states.
+  claim deadline). Only what the policy text states; do not add general advice or lists of documents.
 - explanation: three to five calm, plain sentences for the family on how the policy treats this bill
   and what to do next. Do not state rupee totals; they are calculated separately.
 - Never promise that a claim will be approved.
@@ -119,6 +122,32 @@ def compare_bill_to_policy(bill_items: list[dict], policy: dict, policy_text: st
     return build_report(lines, reply, policy, policy_text, method="ai")
 
 
+_QTY_RATE = re.compile(r"\((\d+(?:\.\d+)?) x Rs (\d+(?:\.\d+)?)\)")
+_ROOM = re.compile(r"\b(room|bed|ward|boarding)\b", re.IGNORECASE)
+_NOT_ROOM = re.compile(r"\b(icu|iccu|nicu|theatre|operating|operation|recovery|emergency)\b", re.IGNORECASE)
+
+
+def _room_rent_cap(line: dict, policy: dict) -> Optional[tuple[float, str]]:
+    """
+    For a room-rent line with its days and daily rate, what a fixed per-day limit allows, with the
+    reason. Worked out here rather than by the model: it is plain arithmetic and it is money.
+    """
+    limit = policy.get("room_rent_limit_per_day")
+    desc = line["description"]
+    found = _QTY_RATE.search(desc)
+    if not limit or not found or not _ROOM.search(desc) or _NOT_ROOM.search(desc):
+        return None
+    days, rate = float(found.group(1)), float(found.group(2))
+    if rate <= limit:
+        return None
+    allowed = round(min(line["amount"], days * limit), 2)
+    reason = (
+        f"Your policy pays room rent up to {_rupees(limit)} a day. {days:g} days were billed at "
+        f"{_rupees(rate)} a day, so {_rupees(allowed)} of this is claimable."
+    )
+    return allowed, reason
+
+
 def build_report(lines: list[dict], reply: CoverageReply, policy: dict, policy_text: str, method: str) -> dict:
     """Recomputes every amount from the per-line judgements and the policy's own numbers."""
     judged = {j.bill_item_id: j for j in reply.items}
@@ -135,7 +164,11 @@ def build_report(lines: list[dict], reply: CoverageReply, policy: dict, policy_t
         else:  # not_covered, unclear: nothing is counted as claimable
             claimable = 0.0
         claimable = round(min(max(claimable, 0.0), amount), 2)
-        status = j.status
+        status, reason = j.status, j.reason.strip()
+        capped = _room_rent_cap(line, policy)
+        if capped and status in ("covered", "partly_covered"):
+            claimable, reason = capped
+            status = "partly_covered"
         if status == "partly_covered" and claimable >= amount:
             status = "covered"
         if status == "partly_covered" and claimable == 0:
@@ -144,7 +177,7 @@ def build_report(lines: list[dict], reply: CoverageReply, policy: dict, policy_t
             **line,
             "status": status,
             "claimable_amount": claimable,
-            "reason": j.reason.strip(),
+            "reason": reason,
             "policy_quote": _verified_quote(j.policy_quote.strip(), policy_text),
         })
 

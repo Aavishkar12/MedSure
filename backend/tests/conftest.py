@@ -9,4 +9,5 @@ def isolated_files(tmp_path_factory):
     settings.extractions_dir = str(tmp_path_factory.mktemp("extractions"))
     settings.upload_dir = str(tmp_path_factory.mktemp("uploads"))
     settings.groq_api_key = ""
+    settings.firebase_credentials = ""  # tests never send pushes, whatever the developer's .env says
     settings.demo_fallback = False

@@ -198,6 +198,8 @@ CARD_TASK = """Extract a Discharge Card from this discharge summary / medical re
 - follow_ups: each review visit or test the document asks for, with when it is due."""
 BILL_TASK = """Extract every billed line item from this hospital bill. Skip subtotals, totals, taxes and payments.
 Extract unit prices, quantities, and line amounts where visible.
+For every line, write explanation: one short plain sentence saying what this charge is for, for
+someone with no medical background ("The fee for the doctor who gave the anaesthesia").
 Set worth_asking to true only for things visible in the bill itself: duplicated lines, unusually
 high quantities, or vague descriptions like "miscellaneous". Give the reason in ask_reason, phrased
 as a neutral question for the billing desk, never as an accusation.

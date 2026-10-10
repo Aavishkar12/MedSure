@@ -1,7 +1,9 @@
 """Firebase Admin: ID token verification and FCM. Everything Firebase-specific lives here."""
 
 import json
+import logging
 from functools import lru_cache
+from pathlib import Path
 
 try:
     import firebase_admin
@@ -14,6 +16,8 @@ except ImportError:
 
 from .config import settings
 
+log = logging.getLogger("medsure.firebase")
+
 
 @lru_cache
 def _app():
@@ -21,6 +25,11 @@ def _app():
         return None
     raw = settings.firebase_credentials.strip()
     if not raw:
+        return None
+    if not raw.startswith("{") and not Path(raw).is_file():
+        # .env.example points at a key file a new checkout does not have yet. Push and token sign-in
+        # stay off; everything else (documents, AI, dev sign-in) must keep working.
+        log.warning(f"FIREBASE_CREDENTIALS file not found: {raw}. Push and Firebase sign-in are disabled.")
         return None
     cred = credentials.Certificate(json.loads(raw) if raw.startswith("{") else raw)
     return firebase_admin.initialize_app(cred)
