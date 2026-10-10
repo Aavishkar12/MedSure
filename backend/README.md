@@ -25,10 +25,9 @@ accounts. Without `GROQ_API_KEY` documents are read by the rule-based parsers on
 the usual layouts work, anything else is marked failed with a message saying the AI is not configured.
 The backend never returns sample data in place of a document it could not read.
 
-**OCR for scanned PDFs and photos** needs the Tesseract program as well as the Python packages:
-Windows: install from https://github.com/UB-Mannheim/tesseract/wiki and set `TESSERACT_CMD` in `.env`
-if it is not on PATH; macOS: `brew install tesseract`; Debian/Ubuntu: `apt install tesseract-ocr`.
-Without it, scans are still read when `GROQ_API_KEY` is set (the vision model reads the page images).
+**Scans and photos are read on the phone, not here.** The app reads the text on the device with Google
+ML Kit and sends it with the upload as `ocr_text`. The backend has no OCR of its own and never sends page
+images to the AI: a scan or photo that arrives without `ocr_text` is marked failed with a message saying so.
 
 ## Auth
 
@@ -56,12 +55,12 @@ MedSure integrates server-side Groq LLMs (`GROQ_API_KEY`) to extract structured 
 - **Insurance coverage (`GET`/`POST /cases/{case_id}/coverage`):** every bill line compared with the policy: covered, partly covered, not covered or unclear, with a plain reason and a quote from the policy. The AI judges each line; co-pay, deductible, the sum-insured cap and all totals are computed in code, and policy quotes are checked against the policy text. Runs by itself once both a bill and a policy have been read.
 - **Grounded Q&A (`POST /cases/{case_id}/ask`):** Answering user questions grounded strictly in their uploaded case documents with source document, page, and exact quotes.
 
-How a document is read: file -> text (PDF text layer, OCR text sent by the phone, or Tesseract) ->
-document type (the upload category, corrected by `app/pipeline/classifier.py` when the text clearly says
-otherwise) -> structured data. Medicines and tests the AI names that do not appear in the document text
-are dropped. Upload with `POST /cases/{id}/documents` (field `file`, or several `files`), then poll
+How a document is read: file -> text (the PDF's own text layer, or the text the phone read) -> saved on the
+`document` row -> document type (the upload category, corrected by `app/pipeline/classifier.py` when the text
+clearly says otherwise) -> that saved text is sent to the Groq text model -> structured data. Medicines and
+tests the AI names that do not appear in the document text are dropped. Upload with `POST /cases/{id}/documents` (field `file`, or several `files`), then poll
 `GET /documents/{id}` or `GET /jobs/{job_id}`; `POST /documents/{id}/retry` reads a failed one again.
-The recognized text and deterministic structured extraction are stored on the `document` row in
+The text and deterministic structured extraction are stored on the `document` row in
 PostgreSQL. They survive Render restarts and are used for duplicate-file caching and debug endpoints.
 
 ## Running Tests

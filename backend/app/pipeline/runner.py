@@ -41,7 +41,7 @@ def run_pipeline_for_document(
     cached: Optional[Dict[str, Any]] = None,
 ) -> Tuple[DocumentExtractionEnvelope, str]:
     """
-    Uploaded document -> text (text layer, phone OCR or Tesseract) -> classification -> rule-based parsing.
+    Uploaded document -> text (PDF text layer, or text read on the phone) -> classification -> rule-based parsing.
     Returns structured JSON with the full page-marked text. Persistence belongs
     to the API layer so database transactions remain the source of truth.
     """

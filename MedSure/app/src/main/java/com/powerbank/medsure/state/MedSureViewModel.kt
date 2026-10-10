@@ -22,6 +22,7 @@ import org.json.JSONObject
 import com.powerbank.medsure.i18n.AllLanguages
 import com.powerbank.medsure.i18n.Tx
 import com.powerbank.medsure.net.Backend
+import com.powerbank.medsure.ocr.OnDeviceText
 import com.powerbank.medsure.push.PushBus
 import com.powerbank.medsure.ui.theme.Ms
 import kotlinx.coroutines.flow.collectLatest
@@ -242,7 +243,7 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * Uploads the onboarding documents and waits while the backend reads them (OCR + AI), so the
+     * Uploads the onboarding documents and waits while the backend reads them, so the
      * home screen opens with the patient's own discharge card, bill and policy. Safe to call again
      * after a failure: files already uploaded are not sent twice, and failed ones are read again.
      */
@@ -265,7 +266,7 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
                     val key = doc.uri.toString()
                     val known = uploadedDocs[key]
                     if (known == null) {
-                        uploadedDocs[key] = Backend.uploadDocument(app, id, doc, type)
+                        uploadedDocs[key] = Backend.uploadDocument(app, id, withPhoneText(app, doc), type)
                     } else if (Backend.document(known).status == "failed") {
                         Backend.retryDocument(known)
                     }
@@ -527,6 +528,13 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
         if (list != caseDocuments.toList()) { caseDocuments.clear(); caseDocuments.addAll(list) }
     }
 
+    /**
+     * A photo or scanned PDF picked from files is read on this phone before it goes up, the same way a
+     * camera scan is. The server has no way to read a picture: it stores this text and gives it to the AI.
+     */
+    private suspend fun withPhoneText(context: Context, doc: UploadedDoc): UploadedDoc =
+        if (doc.ocrText != null) doc else doc.copy(ocrText = OnDeviceText.readPicked(context, doc))
+
     var addingDocs by mutableStateOf(false)
     var addDocsError by mutableStateOf<String?>(null)
 
@@ -543,7 +551,7 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 val id = syncLock.withLock { ensureSession(createCase = isPatient) }
                     ?: throw java.io.IOException(tx["noCaseYet"])
-                val ids = docs.map { Backend.uploadDocument(app, id, it, docType) }
+                val ids = docs.map { Backend.uploadDocument(app, id, withPhoneText(app, it), docType) }
                 loadCaseAnalysis(id) // shows them as "being read" straight away
                 val deadline = System.currentTimeMillis() + 180_000
                 var states = ids.map { Backend.document(it) }

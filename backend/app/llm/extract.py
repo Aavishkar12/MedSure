@@ -224,19 +224,15 @@ Distinguish explicit policy text from any interpretation. Never guarantee claim 
 T = TypeVar("T", bound=BaseModel)
 
 
-def _extract(schema: type[T], task: str, text: str, images: list[bytes]) -> T:
+def _extract(schema: type[T], task: str, text: str) -> T:
+    if not text.strip():
+        raise ValueError("There is no text to read in this document")
     system = RULES + json.dumps(schema.model_json_schema())
-    if text and images:
-        body = f"OCR text of the attached pages (may contain reading errors; trust the images):\n{text[:MAX_TEXT_CHARS]}"
-    elif text:
-        body = f"Document text:\n{text[:MAX_TEXT_CHARS]}"
-    else:
-        body = "The document pages are attached as images."
-    user = f"{task}\n\n{body}"
+    user = f"{task}\n\nDocument text:\n{text[:MAX_TEXT_CHARS]}"
     error = ""
     for _ in range(2):  # one retry with the validation error fed back
         try:
-            return schema.model_validate(complete_json(system, user + error, images or None))
+            return schema.model_validate(complete_json(system, user + error))
         except (ValidationError, json.JSONDecodeError, ValueError) as e:
             logger.warning(f"Validation error during extraction: {e}")
             error = f"\n\nYour previous reply was invalid: {str(e)[:1500]}\nReturn corrected JSON only."
@@ -264,11 +260,11 @@ def in_document(name: str, doc_text: str) -> bool:
     return f" {key[:6]}" in f" {_norm(doc_text)}"  # first 6 letters: tolerates plural / brand suffixes
 
 
-def extract_discharge_card(text: str, images: list[bytes] | None = None) -> dict:
-    card = _extract(DischargeCardData, CARD_TASK, text, images or [])
+def extract_discharge_card(text: str) -> dict:
+    card = _extract(DischargeCardData, CARD_TASK, text)
     for lab in card.lab_values:
         lab.concept = _clean_concept(lab.concept)
-    if text and not images:
+    if text:
         # Grounding check: a medicine or test the model names must be in this document.
         # Lab names are often abbreviated in reports ("Hb"), so a lab value may match on its number instead.
         def lab_found(lab: LabValue) -> bool:
@@ -283,8 +279,8 @@ def extract_discharge_card(text: str, images: list[bytes] | None = None) -> dict
     return {**card.model_dump(), "disclaimer": DISCLAIMER}
 
 
-def extract_bill(text: str, images: list[bytes] | None = None) -> list[dict]:
-    bill = _extract(BillData, BILL_TASK, text, images or [])
+def extract_bill(text: str) -> list[dict]:
+    bill = _extract(BillData, BILL_TASK, text)
     for item in bill.items:
         item.concept = _clean_concept(item.concept)
 
@@ -302,20 +298,20 @@ def extract_bill(text: str, images: list[bytes] | None = None) -> list[dict]:
     return items_dump
 
 
-def extract_prescription(text: str, images: list[bytes] | None = None) -> dict:
-    rx = _extract(PrescriptionData, PRESCRIPTION_TASK, text, images or [])
-    if text and not images:
+def extract_prescription(text: str) -> dict:
+    rx = _extract(PrescriptionData, PRESCRIPTION_TASK, text)
+    if text:
         rx.medicines = [m for m in rx.medicines if in_document(m.medicine_name, text)]
     return {**rx.model_dump(), "disclaimer": DISCLAIMER}
 
 
-def extract_lab_report(text: str, images: list[bytes] | None = None) -> dict:
-    lab = _extract(LabReportData, LAB_TASK, text, images or [])
+def extract_lab_report(text: str) -> dict:
+    lab = _extract(LabReportData, LAB_TASK, text)
     for res in lab.results:
         res.concept = _clean_concept(res.concept)
     return {**lab.model_dump(), "disclaimer": DISCLAIMER}
 
 
-def extract_policy(text: str, images: list[bytes] | None = None) -> dict:
-    pol = _extract(PolicyData, POLICY_TASK, text, images or [])
+def extract_policy(text: str) -> dict:
+    pol = _extract(PolicyData, POLICY_TASK, text)
     return {**pol.model_dump(), "disclaimer": DISCLAIMER}

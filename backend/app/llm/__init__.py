@@ -1,4 +1,4 @@
-from .client import LLMError, complete_json, complete_text, file_to_images, file_to_text
+from .client import LLMError, complete_json, complete_text, file_to_text
 from .coverage import compare_bill_to_policy, rule_based_report
 from .draft import draft_letter
 from .extract import (
@@ -22,7 +22,6 @@ __all__ = [
     "extract_lab_report",
     "extract_policy",
     "extract_prescription",
-    "file_to_images",
     "file_to_text",
     "rule_based_report",
 ]

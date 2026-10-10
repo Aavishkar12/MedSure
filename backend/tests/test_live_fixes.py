@@ -79,29 +79,3 @@ def test_rate_limit_gives_up_with_a_message_for_the_user():
             client._chat(model="m", messages=[])
     assert sleep.call_count == client.RATE_LIMIT_ATTEMPTS - 1
     assert all(c.args[0] == client.RATE_LIMIT_MAX_WAIT for c in sleep.call_args_list)  # capped
-
-
-def test_camera_scan_uses_page_images_when_short_and_phone_text_when_long(tmp_path):
-    """A scan arrives as a PDF plus the text the phone read from each page."""
-    import pymupdf
-
-    from app.llm.client import MAX_IMAGES
-    from app.models import Document
-    from app.routers.documents import _llm_inputs
-
-    def scan(pages: int) -> Document:
-        pdf = pymupdf.open()
-        for _ in range(pages):
-            pdf.new_page()
-        path = tmp_path / f"scan{pages}.pdf"
-        pdf.save(path)
-        text = "\n\n".join(f"[Page {i}]\nDischarge summary page {i}" for i in range(1, pages + 1))
-        return Document(case_id=1, doc_type="discharge_summary", filename=path.name, path=str(path), sha256="x", text=text)
-
-    short = scan(2)
-    text, images = _llm_inputs(short, short.text, "device_ocr")
-    assert len(images) == 2 and text == short.text  # the AI looks at the pages, with the text as a hint
-
-    long = scan(MAX_IMAGES + 3)
-    text, images = _llm_inputs(long, long.text, "device_ocr")
-    assert images == [] and "[Page 8]" in text  # every page is read, from the phone's text

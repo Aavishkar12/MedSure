@@ -171,7 +171,7 @@ class DocumentExtractionEnvelope(BaseModel):
     doc_type: str
     classification_confidence: Optional[float] = None
     pages: int = 0
-    extraction_method: str = "text_layer"  # text_layer | ocr
+    extraction_method: str = "text_layer"  # text_layer | device_ocr (read on the phone)
     extraction_confidence: Optional[float] = None
     warnings: List[str] = Field(default_factory=list)
     extracted_at: str = Field(default_factory=utc_now_iso)

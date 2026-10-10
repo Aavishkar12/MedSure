@@ -69,7 +69,7 @@ class Document(SQLModel, table=True):
     filename: str
     path: str
     sha256: str = Field(index=True)
-    text: Optional[str] = None  # OCR / extracted text with [Page N] markers
+    text: Optional[str] = None  # PDF text layer or text read on the phone, with [Page N] markers. This is what goes to the AI.
     # The deterministic extraction is durable application data. Keeping it in
     # Postgres (rather than Render's ephemeral filesystem) also makes hash-cache
     # reuse and the extraction debug endpoints work across deploys/restarts.

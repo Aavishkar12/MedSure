@@ -12,23 +12,18 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.platform.LocalContext
-import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.documentscanner.GmsDocumentScannerOptions
 import com.google.mlkit.vision.documentscanner.GmsDocumentScanning
 import com.google.mlkit.vision.documentscanner.GmsDocumentScanningResult
-import com.google.mlkit.vision.text.TextRecognition
-import com.google.mlkit.vision.text.latin.TextRecognizerOptions
+import com.powerbank.medsure.ocr.OnDeviceText
 import com.powerbank.medsure.state.UploadedDoc
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-
-private const val MAX_PAGES = 20
 
 private tailrec fun Context.findActivity(): Activity? = when (this) {
     is Activity -> this
@@ -41,8 +36,8 @@ private tailrec fun Context.findActivity(): Activity? = when (this) {
  * it finds the page edges, straightens and cleans each page, and lets the user add more pages.
  *
  * The scan comes back as one PDF kept in the app's own storage (so it is still there after a
- * restart), together with the text read from each page on the phone. That text goes to the backend
- * with the file, which matters for long scans: the AI can only look at a few page images at a time.
+ * restart), together with the text read from each page on the phone. That text is what the backend
+ * stores and sends to the AI: the page pictures themselves are never sent to be read.
  *
  * The scanner runs inside Google Play services, so the app needs no camera permission.
  */
@@ -55,7 +50,7 @@ fun rememberDocumentScanner(onScanned: (UploadedDoc) -> Unit, onError: (String) 
             GmsDocumentScannerOptions.Builder()
                 .setScannerMode(GmsDocumentScannerOptions.SCANNER_MODE_FULL)
                 .setGalleryImportAllowed(true)
-                .setPageLimit(MAX_PAGES)
+                .setPageLimit(OnDeviceText.MAX_PAGES)
                 .setResultFormats(GmsDocumentScannerOptions.RESULT_FORMAT_PDF, GmsDocumentScannerOptions.RESULT_FORMAT_JPEG)
                 .build()
         )
@@ -73,7 +68,7 @@ fun rememberDocumentScanner(onScanned: (UploadedDoc) -> Unit, onError: (String) 
             try {
                 val pages = scan.pages.orEmpty().map { it.imageUri }
                 val doc = withContext(Dispatchers.IO) { saveScan(app, pdf.uri) }
-                onScanned(doc.copy(ocrText = readText(app, pages)))
+                onScanned(doc.copy(ocrText = OnDeviceText.readPages(app, pages)))
             } catch (e: Exception) {
                 Log.w("MedSure", "Saving the scan failed", e)
                 onError("The scan could not be saved. Please try again.")
@@ -102,20 +97,4 @@ private fun saveScan(context: Context, source: Uri): UploadedDoc {
     val file = File(folder, "Scan $stamp.pdf")
     context.contentResolver.openInputStream(source)!!.use { input -> file.outputStream().use { input.copyTo(it) } }
     return UploadedDoc(Uri.fromFile(file), file.name, file.length(), "application/pdf")
-}
-
-/** Text of every page, marked [Page N] the way the backend expects. Null when nothing could be read. */
-private suspend fun readText(context: Context, pages: List<Uri>): String? {
-    if (pages.isEmpty()) return null
-    val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
-    return try {
-        val text = pages.mapIndexedNotNull { i, uri ->
-            val page = runCatching { recognizer.process(InputImage.fromFilePath(context, uri)).await().text.trim() }
-                .onFailure { Log.w("MedSure", "Could not read page ${i + 1}", it) }.getOrNull()
-            page?.takeIf { it.isNotEmpty() }?.let { "[Page ${i + 1}]\n$it" }
-        }.joinToString("\n\n")
-        text.takeIf { it.length >= 40 } // too little to be useful: let the AI read the page images instead
-    } finally {
-        recognizer.close()
-    }
 }

@@ -8,6 +8,3 @@ pydantic-settings
 firebase-admin
 groq
 pymupdf
-# OCR for scanned PDFs and photos. Also needs the Tesseract program: see README.
-pytesseract
-Pillow
