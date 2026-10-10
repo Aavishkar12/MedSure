@@ -251,7 +251,11 @@ object Backend {
      */
     private suspend fun baseUrl(): String = base ?: withContext(Dispatchers.IO) {
         val candidates = BuildConfig.API_URL.split(',').map { it.trim().trimEnd('/') }.filter { it.isNotEmpty() }
-        candidates.firstOrNull(::reachable) ?: throw IOException("Backend not reachable at any of $candidates")
+        // A single hosted URL does not need a separate health probe. Render's free service may be
+        // asleep, and the old 2.5-second probe failed before Render had time to wake even though
+        // the real request (which has a longer timeout) would have succeeded.
+        if (candidates.size == 1) candidates.single()
+        else candidates.firstOrNull(::reachable) ?: throw IOException("Backend not reachable at any of $candidates")
     }.also { base = it }
 
     private fun reachable(url: String): Boolean = runCatching {
