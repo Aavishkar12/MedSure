@@ -12,12 +12,6 @@ from .parsers import (
     parse_unknown,
 )
 from .schemas import DocumentExtractionEnvelope, utc_now_iso
-from .storage import (
-    find_cached_extraction_by_hash,
-    save_document_extraction,
-    save_raw_text,
-    update_case_merged_extraction,
-)
 
 logger = logging.getLogger("medsure.pipeline")
 
@@ -44,17 +38,18 @@ def run_pipeline_for_document(
     source_filename: str,
     hint_doc_type: Optional[str] = None,
     supplied_text: Optional[str] = None,
+    cached: Optional[Dict[str, Any]] = None,
 ) -> Tuple[DocumentExtractionEnvelope, str]:
     """
     Uploaded document -> text (text layer, phone OCR or Tesseract) -> classification -> rule-based parsing.
-    Saves the structured JSON and returns it with the full page-marked text. Does not use any LLM.
+    Returns structured JSON with the full page-marked text. Persistence belongs
+    to the API layer so database transactions remain the source of truth.
     """
     case_str = str(case_id)
     doc_str = str(doc_id)
     warnings = []
 
     # 1. Same file seen before: reuse its text and parse.
-    cached = find_cached_extraction_by_hash(file_hash)
     if cached:
         logger.info(f"Reusing cached extraction for hash {file_hash[:8]} on case {case_str} doc {doc_str}")
         envelope = DocumentExtractionEnvelope(
@@ -72,15 +67,11 @@ def run_pipeline_for_document(
             fields=cached.get("fields", {}),
         )
         text = cached.get("raw_text", "")
-        save_raw_text(case_str, doc_str, text)
-        save_document_extraction(envelope)
-        update_case_merged_extraction(case_str)
         return envelope, text
 
     # 2. Text extraction
     text_result = extract_document_text(file_path, supplied_text)
     warnings.extend(text_result.warnings)
-    save_raw_text(case_str, doc_str, text_result.full_text)
 
     # 3. Deterministic classification, falling back to the category the user uploaded it under
     final_type, class_conf = classify_document_text(text_result.full_text)
@@ -133,6 +124,4 @@ def run_pipeline_for_document(
         extracted_at=utc_now_iso(),
         fields=fields_dict,
     )
-    save_document_extraction(envelope)
-    update_case_merged_extraction(case_str)
     return envelope, text

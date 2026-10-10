@@ -34,7 +34,7 @@ from ..models import (
 )
 from ..notify import notify_case
 from ..pipeline.runner import run_pipeline_for_document
-from ..pipeline.storage import load_document_extraction, update_case_merged_extraction
+from ..pipeline.schemas import CaseExtractionEnvelope, DocumentExtractionEnvelope
 from .coverage import refresh_coverage
 
 logger = logging.getLogger("medsure.documents")
@@ -67,6 +67,41 @@ def _previous(session: Session, doc: Document, model):
         .where(Document.sha256 == doc.sha256, Document.doc_type == doc.doc_type, Document.id != doc.id)
     )
     return session.exec(stmt).all()
+
+
+def _cached_extraction(session: Session, doc: Document) -> Optional[dict]:
+    """Return an identical document's durable parse, excluding demo data."""
+    cached = session.exec(
+        select(Document)
+        .where(
+            Document.sha256 == doc.sha256,
+            Document.id != doc.id,
+            Document.extraction.is_not(None),
+            Document.extraction_method != "demo_fallback",
+        )
+        .order_by(Document.id.desc())
+    ).first()
+    if not cached or not cached.extraction:
+        return None
+    return {**cached.extraction, "raw_text": cached.text or ""}
+
+
+def _case_extraction(session: Session, case_id: int) -> CaseExtractionEnvelope:
+    """Build the case extraction response from PostgreSQL, never local disk."""
+    documents = []
+    rows = session.exec(
+        select(Document)
+        .where(Document.case_id == case_id, Document.extraction.is_not(None))
+        .order_by(Document.id)
+    ).all()
+    for row in rows:
+        try:
+            documents.append(DocumentExtractionEnvelope.model_validate(row.extraction))
+        except Exception:
+            logger.exception("Ignoring invalid extraction JSON for document %s", row.id)
+    return CaseExtractionEnvelope(
+        case_id=str(case_id), total_documents=len(documents), documents=documents
+    )
 
 
 def _llm_inputs(doc: Document, text: str, method: str) -> tuple[str, list[bytes]]:
@@ -275,6 +310,8 @@ def _process(session: Session, doc_id: int) -> Optional[dict]:
     if not doc:
         return None
     info: dict = {"doc_id": doc.id, "filename": doc.filename}
+    extraction: Optional[dict] = None
+    extracted_text: Optional[str] = None
     try:
         envelope, text = run_pipeline_for_document(
             case_id=doc.case_id,
@@ -284,7 +321,13 @@ def _process(session: Session, doc_id: int) -> Optional[dict]:
             source_filename=doc.filename,
             hint_doc_type=doc.doc_type,
             supplied_text=doc.text,
+            cached=_cached_extraction(session, doc),
         )
+        extraction = envelope.model_dump(mode="json")
+        extracted_text = text
+        doc.classified_type = envelope.doc_type
+        doc.extraction_method = envelope.extraction_method
+        doc.extraction = extraction
         doc.doc_type = _doc_type(doc.doc_type, envelope)
         if text.strip():
             doc.text = text
@@ -296,6 +339,14 @@ def _process(session: Session, doc_id: int) -> Optional[dict]:
         logger.exception(f"Document processing failed for doc_id {doc_id}")
         session.rollback()
         doc = session.get(Document, doc_id)
+        # Parsing may have succeeded before the user-facing LLM/card step failed.
+        # Keep that deterministic result available for diagnostics and retry.
+        if extraction is not None:
+            doc.extraction = extraction
+            doc.classified_type = extraction.get("doc_type")
+            doc.extraction_method = extraction.get("extraction_method")
+            if extracted_text and extracted_text.strip():
+                doc.text = extracted_text
         doc.status = "failed"
         doc.error = str(e) if isinstance(e, (ValueError, llm.LLMError)) else "We couldn't read this document."
     session.add(doc)
@@ -365,7 +416,6 @@ def execute_job_processing(job_id: str, case_id: int, doc_ids: List[int]) -> Non
         job.completed_at = datetime.now(timezone.utc)
         session.add(job)
         session.commit()
-    update_case_merged_extraction(case_id)
 
 
 # ---------- Upload ----------
@@ -501,16 +551,18 @@ def get_job_status(job_id: str, user: User = Depends(current_user), session: Ses
 def get_case_extractions(case_id: int, user: User = Depends(current_user), session: Session = Depends(get_session)):
     """The rule-based extraction of every document on the case, for debugging the pipeline."""
     require_member(session, case_id, user)
-    return update_case_merged_extraction(case_id).model_dump()
+    return _case_extraction(session, case_id).model_dump()
 
 
 @router.get("/cases/{case_id}/extractions/{doc_id}")
 def get_document_extraction(case_id: int, doc_id: int, user: User = Depends(current_user), session: Session = Depends(get_session)):
     require_member(session, case_id, user)
-    extraction = load_document_extraction(case_id, doc_id)
-    if not extraction:
+    document = session.exec(
+        select(Document).where(Document.id == doc_id, Document.case_id == case_id)
+    ).first()
+    if not document or not document.extraction:
         raise HTTPException(404, f"No structured extraction found for document {doc_id}")
-    return extraction.model_dump()
+    return DocumentExtractionEnvelope.model_validate(document.extraction).model_dump()
 
 
 @router.get("/cases/{case_id}/documents", response_model=List[Document])

@@ -14,6 +14,7 @@ cd backend
 python -m venv .venv
 .venv/Scripts/python -m pip install -r requirements.txt   # macOS/Linux: .venv/bin/python
 cp .env.example .env                                       # then fill in; ask Ravi for the shared values
+.venv/Scripts/python -m app.migrate
 .venv/Scripts/python -m uvicorn app.main:app --reload --host 0.0.0.0
 ```
 
@@ -60,6 +61,8 @@ document type (the upload category, corrected by `app/pipeline/classifier.py` wh
 otherwise) -> structured data. Medicines and tests the AI names that do not appear in the document text
 are dropped. Upload with `POST /cases/{id}/documents` (field `file`, or several `files`), then poll
 `GET /documents/{id}` or `GET /jobs/{job_id}`; `POST /documents/{id}/retry` reads a failed one again.
+The recognized text and deterministic structured extraction are stored on the `document` row in
+PostgreSQL. They survive Render restarts and are used for duplicate-file caching and debug endpoints.
 
 ## Running Tests
 
@@ -85,11 +88,35 @@ The tests never call Groq: the AI replies are mocked.
 | `app/firebase.py`, `app/notify.py` | Token verification and push notifications |
 | `tests/` | Comprehensive test suite for LLM extraction, bill reconciliation, validations, and API routes |
 
-Tables are created on startup but never altered. After changing `models.py`:
+## Database migrations
+
+Alembic owns the schema. The migration command is safe for both a fresh database and an existing
+MedSure database previously created with `create_all`; it validates and adopts the old schema before
+applying changes:
+
+```bash
+.venv/Scripts/python -m app.migrate
+```
+
+After changing `models.py`, generate and review a migration. Do not reset the hosted database:
+
+```bash
+.venv/Scripts/python -m alembic revision --autogenerate -m "describe the change"
+.venv/Scripts/python -m alembic upgrade head
+```
+
+For an intentionally destructive local reset only:
 
 ```bash
 .venv/Scripts/python -m app.reset_db --yes   # deletes all data
 ```
+
+## Render + PostgreSQL
+
+Create a Render Blueprint from the repository's root `render.yaml`. Set `DATABASE_URL`,
+`FIREBASE_CREDENTIALS`, and `GROQ_API_KEY` as Render secrets. The service runs migrations before each
+start, and `/health` performs a real database query. With the Android app pointed at the Render HTTPS
+URL, neither the API nor PostgreSQL depends on a developer laptop.
 
 ## Push notification payload
 

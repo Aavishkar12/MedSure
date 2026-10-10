@@ -70,6 +70,12 @@ class Document(SQLModel, table=True):
     path: str
     sha256: str = Field(index=True)
     text: Optional[str] = None  # OCR / extracted text with [Page N] markers
+    # The deterministic extraction is durable application data. Keeping it in
+    # Postgres (rather than Render's ephemeral filesystem) also makes hash-cache
+    # reuse and the extraction debug endpoints work across deploys/restarts.
+    classified_type: Optional[str] = None
+    extraction_method: Optional[str] = None
+    extraction: Optional[dict] = Field(default=None, sa_column=Column(JSON))
     status: str = "processing"  # processing | ready | failed
     error: Optional[str] = None
     created_at: datetime = Field(default_factory=now)
