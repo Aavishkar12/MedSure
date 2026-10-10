@@ -94,6 +94,20 @@ fun SettingsScreen(vm: MedSureViewModel) {
             PlusCard(vm)
         }
 
+        if (vm.extractedData != null) {
+            Caps("DOCUMENT DEBUG")
+            MsCard(onClick = { vm.showExtractionDebug = true }) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                    Ico(LineIcons.FileText, Ms.Ink)
+                    Column(Modifier.weight(1f)) {
+                        T("Pipeline extractions", 16, 700)
+                        T("Inspect the structured OCR data stored for this case", 13, 400, Ms.Muted)
+                    }
+                    Ico(LineIcons.ChevronRight, Ms.Ink, 18.dp)
+                }
+            }
+        }
+
         MsButton(
             t["logout"], BtnKind.Ghost, Modifier.fillMaxWidth().padding(top = 6.dp), icon = LineIcons.LogOut,
             borderColor = Ms.Red, textColor = Ms.Red,

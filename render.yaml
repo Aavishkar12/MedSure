@@ -3,9 +3,10 @@ services:
     name: medsure-api
     runtime: python
     plan: free
+    region: singapore
     rootDir: backend
     buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    startCommand: python -m app.migrate && uvicorn app.main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /health
     envVars:
       - key: PYTHON_VERSION
@@ -16,6 +17,4 @@ services:
       - key: DATABASE_URL
         sync: false
       - key: FIREBASE_CREDENTIALS # paste the whole service-account JSON as the value
-        sync: false
-      - key: GROQ_API_KEY
         sync: false

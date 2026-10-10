@@ -1,4 +1,4 @@
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session, create_engine
 
 from .config import settings
 
@@ -10,12 +10,6 @@ if url.startswith("postgres://"):  # some hosts hand out the old scheme
 connect_args = {"check_same_thread": False} if url.startswith("sqlite") else {"connect_timeout": 10}
 # pool_pre_ping: hosted Postgres drops idle connections.
 engine = create_engine(url, connect_args=connect_args, pool_pre_ping=True)
-
-
-def init_db() -> None:
-    from . import models  # noqa: F401  (registers tables)
-
-    SQLModel.metadata.create_all(engine)
 
 
 def get_session():

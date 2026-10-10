@@ -13,6 +13,20 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 
+data class LocalOcrPagePayload(
+    val pageNumber: Int,
+    val text: String,
+    val confidence: Double? = null,
+)
+
+data class LocalOcrDocumentPayload(
+    val filename: String,
+    val docType: String = "unknown",
+    val pages: List<LocalOcrPagePayload>,
+    val fileHash: String? = null,
+    val warnings: List<String> = emptyList(),
+)
+
 /** Talks to the MedSure backend. Every call carries the signed-in user's Firebase ID token. */
 object Backend {
     private val auth get() = FirebaseAuth.getInstance()
@@ -110,6 +124,47 @@ object Backend {
         val levels = answers.optJSONArray("levels") ?: return null
         return RemoteCheckin(last.getInt("id"), List(levels.length()) { levels.getInt(it) }, answers.optString("note"), last.getString("created_at"))
     }
+
+    /** Sends only text recognized on-device. Original medical files never leave the phone. */
+    suspend fun submitRecognizedDocuments(caseId: Int, docs: List<LocalOcrDocumentPayload>): JSONObject {
+        require(docs.isNotEmpty()) { "At least one recognized document is required" }
+        val documents = JSONArray()
+        docs.forEach { doc ->
+            val pages = JSONArray()
+            doc.pages.forEach { page ->
+                val json = JSONObject()
+                    .put("page_number", page.pageNumber)
+                    .put("text", page.text)
+                page.confidence?.let { json.put("confidence", it) }
+                pages.put(json)
+            }
+            val json = JSONObject()
+                .put("filename", doc.filename)
+                .put("doc_type", doc.docType)
+                .put("pages", pages)
+                .put("warnings", JSONArray(doc.warnings))
+            doc.fileHash?.let { json.put("file_hash", it) }
+            documents.put(json)
+        }
+        return JSONObject(
+            request("POST", "/cases/$caseId/documents", JSONObject().put("documents", documents))
+        )
+    }
+
+    suspend fun jobStatus(jobId: String): JSONObject = JSONObject(request("GET", "/jobs/$jobId"))
+
+    suspend fun caseExtractions(caseId: Int): JSONObject =
+        JSONObject(request("GET", "/cases/$caseId/extractions"))
+
+    suspend fun dischargeCard(caseId: Int): JSONObject? = try {
+        JSONObject(request("GET", "/cases/$caseId/discharge-card"))
+    } catch (e: IOException) {
+        if (e.message?.contains("(404)") == true) null else throw e
+    }
+
+    suspend fun bill(caseId: Int): JSONObject = JSONObject(request("GET", "/cases/$caseId/bill"))
+
+    suspend fun documents(caseId: Int): JSONArray = JSONArray(request("GET", "/cases/$caseId/documents"))
 
     private suspend fun pushToken(): String = FirebaseMessaging.getInstance().token.await()
 

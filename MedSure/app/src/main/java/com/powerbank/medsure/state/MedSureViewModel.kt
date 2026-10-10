@@ -5,6 +5,7 @@ import android.content.Context
 import android.net.Uri
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
@@ -19,6 +20,7 @@ import kotlinx.coroutines.delay
 import com.powerbank.medsure.i18n.AllLanguages
 import com.powerbank.medsure.i18n.Tx
 import com.powerbank.medsure.net.Backend
+import com.powerbank.medsure.net.LocalOcrDocumentPayload
 import com.powerbank.medsure.push.PushBus
 import com.powerbank.medsure.ui.theme.Ms
 import kotlinx.coroutines.flow.collectLatest
@@ -87,6 +89,7 @@ data class Level(
 
 data class Place(
     val id: String, val type: String, val name: String, val meta: String, val dist: String, val open: String, val badge: String,
+    val lat: Double = 0.0, val lng: Double = 0.0,
 )
 
 data class Flag(
@@ -98,6 +101,32 @@ data class CheckItem(
 )
 
 data class Approval(val title: String, val sub: String, val open: () -> Unit)
+
+data class MedicineItemModel(
+    val name: String,
+    val dose: String = "",
+    val schedule: String = "",
+    val purpose: String = "",
+)
+
+data class DischargeCardModel(
+    val diagnosisName: String,
+    val diagnosisPlain: String,
+    val medicines: List<MedicineItemModel> = emptyList(),
+    val precautions: List<String> = emptyList(),
+    val followUps: List<Pair<String, String>> = emptyList(),
+)
+
+data class BillItemModel(
+    val id: Int,
+    val description: String,
+    val amount: Double,
+    val explanation: String = "",
+    val worthAsking: Boolean = false,
+    val askReason: String = "",
+)
+
+data class BillDataModel(val total: Double, val items: List<BillItemModel> = emptyList())
 
 /** All app state. Mirrors the web prototype one-to-one so the screens behave the same. */
 class MedSureViewModel(app: Application) : AndroidViewModel(app) {
@@ -179,6 +208,20 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
     var onbInsPolicy by mutableStateOf("")
     var onbInsDoc by mutableStateOf<UploadedDoc?>(null)
     val onbFamilyMembers = mutableStateListOf<OnboardingFamilyMember>()
+    // Populated by the teammate-owned ML Kit flow. Only these text results are sent to FastAPI.
+    val onbRecognizedDocuments = mutableStateListOf<LocalOcrDocumentPayload>()
+
+    // Server-backed document processing and the data that populates care/bill screens.
+    var processingError by mutableStateOf<String?>(null)
+    var processingStatusText by mutableStateOf("Ready")
+    var processingProgress by mutableFloatStateOf(0.08f)
+    var processingCompletedSteps by mutableIntStateOf(0)
+    var processingCompletedPills by mutableIntStateOf(0)
+    var processingJobId by mutableStateOf<String?>(null)
+    var extractedData by mutableStateOf<JSONObject?>(null)
+    var showExtractionDebug by mutableStateOf(false)
+    var dischargeCardData by mutableStateOf<DischargeCardModel?>(null)
+    var billData by mutableStateOf<BillDataModel?>(null)
 
     val onbStep1Valid: Boolean
         get() = onbFullName.trim().isNotEmpty() &&
@@ -208,6 +251,91 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
         ptab = PTab.Today
         ftab = FTab.Home
         saveOnboarding()
+    }
+
+    /** Submits on-device ML Kit text, waits for deterministic parsing, then loads database-backed UI data. */
+    fun startProcessing(context: Context) {
+        if (processingJobId == "starting") return
+        processingJobId = "starting"
+        processingError = null
+        processingProgress = 0.08f
+        processingCompletedSteps = 0
+        processingCompletedPills = 0
+
+        viewModelScope.launch {
+            try {
+                syncLock.withLock {
+                    processingStatusText = "Securing your profile and documents..."
+                    processingProgress = 0.20f
+                    processingCompletedPills = 1
+
+                    onbFamilyMembers.forEach { helper ->
+                        val number = normalizePhone(helper.phone)
+                        if (members.none { it.phone == number }) {
+                            members.add(Member(helper.name, "other", if (helper.canApprove) "approve" else "view", false, number))
+                        }
+                    }
+                    sessionStale = true
+                    val id = ensureSession() ?: error("Could not create or load the patient case")
+                    processingCompletedSteps = 1
+                    processingCompletedPills = 2
+
+                    val selectedDocuments = (onbReports + onbBills + listOfNotNull(onbInsDoc)).distinctBy { it.uri }
+                    if (selectedDocuments.isNotEmpty()) {
+                        if (onbRecognizedDocuments.isEmpty()) {
+                            error("On-device ML Kit OCR has not supplied recognized text yet.")
+                        }
+                        processingStatusText = "Classifying your recognized document text..."
+                        val upload = Backend.submitRecognizedDocuments(id, onbRecognizedDocuments)
+                        val jobId = upload.optString("job_id")
+                        if (jobId.isBlank()) error("The backend did not create a processing job")
+                        processingJobId = jobId
+
+                        var finished = false
+                        var polls = 0
+                        while (!finished && polls < 90) {
+                            delay(1_000)
+                            polls += 1
+                            val status = Backend.jobStatus(jobId)
+                            val stageName = status.optString("stage")
+                            processingProgress = status.optDouble("progress", 0.3).toFloat().coerceIn(0.08f, 1f)
+                            when (stageName) {
+                                "extracting", "classifying" -> {
+                                    processingStatusText = "Classifying your recognized document text..."
+                                    processingCompletedSteps = 1
+                                }
+                                "parsing", "validating" -> {
+                                    processingStatusText = "Structuring medicines, care and bills..."
+                                    processingCompletedSteps = 2
+                                    processingCompletedPills = 3
+                                }
+                                "completed" -> {
+                                    processingCompletedSteps = 3
+                                    processingCompletedPills = 4
+                                    finished = true
+                                }
+                                "failed" -> error(status.optString("error", "Document processing failed"))
+                            }
+                        }
+                        if (!finished) error("Document processing timed out. Please retry.")
+                        extractedData = Backend.caseExtractions(id)
+                    }
+
+                    processingStatusText = "Populating your care plan..."
+                    loadCaseAnalysis(id)
+                    processingProgress = 1f
+                    processingCompletedSteps = 4
+                    processingCompletedPills = 5
+                    delay(350)
+                }
+                processingJobId = null
+                completeProcessing()
+            } catch (e: Exception) {
+                Log.e("MedSure", "Onboarding document processing failed", e)
+                processingError = e.message ?: "Could not process the documents"
+                processingJobId = null
+            }
+        }
     }
 
     fun verify() {
@@ -252,6 +380,7 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
         onbFullName = ""; onbAge = ""; onbGender = null; onbBloodGroup = null
         onbInteractedName = false; onbInteractedAge = false
         onbReports.clear(); onbBills.clear(); onbInsCompany = ""; onbInsPolicy = ""; onbInsDoc = null
+        onbRecognizedDocuments.clear()
         onbFamilyMembers.clear()
         step = 0; ans.clear(); listening = false; note = ""; noteSaved = ""
         taken.clear(); taken.putAll(mapOf("d1" to true, "d2" to true, "d3" to false, "d4" to false))
@@ -288,7 +417,9 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
             val name = if (isPatient) onbFullName.trim().ifEmpty { me } else ""
             Backend.saveProfile(name, phone, email) // also links this phone number to the cases it was invited to
             var id = Backend.myCaseId(isPatient)
-            if (id == null && isPatient && stage == Stage.App) id = Backend.createCase(name, "self")
+            if (id == null && isPatient && (stage == Stage.App || stage == Stage.Processing)) {
+                id = Backend.createCase(name, "self")
+            }
             caseId = id
             if (id != null) {
                 members.filter { !it.you && it.phone.isNotBlank() }.forEach {
@@ -358,6 +489,47 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** Pulls OCR-derived care and bill data persisted by the backend. */
+    private suspend fun loadCaseAnalysis(id: Int) {
+        Backend.dischargeCard(id)?.let { response ->
+            val data = response.optJSONObject("data") ?: JSONObject()
+            val diagnosis = data.optJSONObject("diagnosis")
+            val medicines = data.optJSONArray("medicines") ?: JSONArray()
+            val precautions = data.optJSONArray("precautions") ?: JSONArray()
+            val followUps = data.optJSONArray("follow_ups") ?: JSONArray()
+            dischargeCardData = DischargeCardModel(
+                diagnosisName = diagnosis?.optString("name").orEmpty(),
+                diagnosisPlain = diagnosis?.optString("plain").orEmpty(),
+                medicines = medicines.mapObjects { item ->
+                    MedicineItemModel(
+                        name = item.optString("name", "Medicine"),
+                        dose = item.optString("dose"),
+                        schedule = item.optString("schedule"),
+                        purpose = item.optString("purpose"),
+                    )
+                },
+                precautions = precautions.mapObjects { item -> item.optString("text") }.filter { it.isNotBlank() },
+                followUps = followUps.mapObjects { item -> item.optString("what") to item.optString("when") },
+            )
+        }
+
+        val bill = Backend.bill(id)
+        val items = bill.optJSONArray("items") ?: JSONArray()
+        billData = BillDataModel(
+            total = bill.optDouble("total", 0.0),
+            items = items.mapObjects { item ->
+                BillItemModel(
+                    id = item.optInt("id"),
+                    description = item.optString("description", "Medical charge"),
+                    amount = item.optDouble("amount"),
+                    explanation = item.optString("explanation"),
+                    worthAsking = item.optBoolean("worth_asking"),
+                    askReason = item.optString("ask_reason"),
+                )
+            },
+        )
+    }
+
     /** Full sync. Runs when the app comes to the front, when a push arrives, and every few seconds while open. */
     fun refresh() {
         if (stage != Stage.App || syncLock.isLocked) return
@@ -365,6 +537,7 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
             val id = ensureSession() ?: return@sync
             flush(id)
             pull(id)
+            loadCaseAnalysis(id)
         }
     }
 
@@ -424,6 +597,20 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
     // ---------- Medicines ----------
     val doses: List<Dose>
         get() {
+            dischargeCardData?.medicines?.takeIf { it.isNotEmpty() }?.let { medicines ->
+                return medicines.mapIndexed { index, medicine ->
+                    val id = "med_$index"
+                    val label = listOf(medicine.name, medicine.dose).filter { it.isNotBlank() }.joinToString(" ")
+                    Dose(
+                        id = id,
+                        name = label.ifBlank { "Medicine" },
+                        time = medicine.schedule.ifBlank { "As prescribed" },
+                        what = medicine.schedule.ifBlank { "Follow the discharge instructions" },
+                        why = medicine.purpose.ifBlank { "From your discharge summary" },
+                        taken = taken[id] == true,
+                    )
+                }
+            }
             val t = tx
             val changed = medChange == "approved"
             val base = listOf(
@@ -558,8 +745,10 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     // ---------- Help ----------
+    val rawPlaces = mutableStateListOf<Place>()
     val places: List<Place>
         get() {
+            if (rawPlaces.isNotEmpty()) return rawPlaces.filter { filter == "all" || it.type == filter }
             val t = tx
             return listOf(
                 Place("h1", "hosp", "[Your discharging hospital]", t["m1"], "4.6 km", t["o24"], t["knows"]),
@@ -572,6 +761,19 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
     // ---------- Bills ----------
     val flags: List<Flag>
         get() {
+            billData?.items?.filter { it.worthAsking }?.takeIf { it.isNotEmpty() }?.let { items ->
+                return items.map { item ->
+                    val amount = String.format(java.util.Locale.US, "₹%,.0f", item.amount)
+                    Flag(
+                        id = "bill_${item.id}",
+                        label = item.description,
+                        amt = amount,
+                        note = item.askReason.ifBlank { item.explanation },
+                        why = item.askReason.ifBlank { "This item was marked for review." },
+                        draft = "Could you please clarify the charge for ${item.description} ($amount)?",
+                    )
+                }
+            }
             val t = tx
             val n = me
             return listOf(
@@ -583,10 +785,17 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
                     "Hello, this is $n, family of Lakshmi (IP [NUMBER]). Could you explain what the ₹1,500 admission and admin charge covers? Thank you."),
             )
         }
-    val billRows = listOf(
-        "Room · 5 days" to "₹42,500", "ICU · 1 day" to "₹22,000", "Doctor & specialist visits" to "₹18,000",
-        "Medicines & IV fluids" to "₹61,230", "Lab tests & scans" to "₹34,800",
-    )
+    val billRows: List<Pair<String, String>>
+        get() = billData?.items?.takeIf { it.isNotEmpty() }?.map { item ->
+            item.description to String.format(java.util.Locale.US, "₹%,.0f", item.amount)
+        } ?: listOf(
+            "Room · 5 days" to "₹42,500", "ICU · 1 day" to "₹22,000", "Doctor & specialist visits" to "₹18,000",
+            "Medicines & IV fluids" to "₹61,230", "Lab tests & scans" to "₹34,800",
+        )
+    val billTotalFormatted: String
+        get() = billData?.takeIf { it.items.isNotEmpty() }?.let {
+            String.format(java.util.Locale.US, "₹%,.0f", it.total)
+        } ?: "₹1,84,350"
     val unsent get() = flags.count { sent[it.id] != true }
 
     // ---------- Claim ----------

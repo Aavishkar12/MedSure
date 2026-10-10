@@ -26,6 +26,7 @@ android {
         versionCode = 1
         versionName = "0.1.0"
         buildConfigField("String", "API_URL", "\"${apiUrl.trimEnd('/')}\"")
+        manifestPlaceholders["MAPS_API_KEY"] = localProps.getProperty("maps.apiKey") ?: ""
     }
 
     buildTypes {
@@ -61,6 +62,10 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.ui:ui-tooling-preview")
     debugImplementation("androidx.compose.ui:ui-tooling")
+
+    implementation("com.google.maps.android:maps-compose:5.0.0")
+    implementation("com.google.android.gms:play-services-location:21.3.0")
+    implementation("com.google.android.libraries.places:places:3.5.0")
 
     implementation(platform("com.google.firebase:firebase-bom:33.7.0"))
     implementation("com.google.firebase:firebase-auth")

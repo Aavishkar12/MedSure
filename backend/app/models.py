@@ -4,7 +4,21 @@ from typing import Optional
 from sqlalchemy import JSON, Column
 from sqlmodel import Field, SQLModel
 
-DOC_TYPES = ["discharge_summary", "lab_report", "prescription", "bill", "id_proof", "policy"]
+DOC_TYPES = [
+    "discharge_summary",
+    "investigation_report",
+    "hospital_bill",
+    "pharmacy_bill",
+    "lab_bill",
+    "insurance_policy",
+    "unknown",
+    # Legacy API values remain accepted while Android clients upgrade.
+    "lab_report",
+    "prescription",
+    "bill",
+    "id_proof",
+    "policy",
+]
 
 
 def now() -> datetime:
@@ -58,12 +72,29 @@ class Document(SQLModel, table=True):
     case_id: int = Field(foreign_key="case.id", index=True)
     doc_type: str
     filename: str
-    path: str
+    path: str  # Blank when OCR happened on-device and the original never left the phone.
     sha256: str = Field(index=True)
-    text: Optional[str] = None  # OCR / extracted text with [Page N] markers
+    text: Optional[str] = None  # ML Kit text with [Page N] markers
     status: str = "processing"  # processing | ready | failed
     error: Optional[str] = None
+    classified_type: Optional[str] = None
+    extraction_method: Optional[str] = None
+    extraction: Optional[dict] = Field(default=None, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=now)
+
+
+class ProcessingJob(SQLModel, table=True):
+    id: str = Field(primary_key=True)
+    case_id: int = Field(foreign_key="case.id", index=True)
+    stage: str = "queued"
+    progress: float = 0.0
+    total_files: int = 1
+    processed_files: int = 0
+    files: list = Field(default_factory=list, sa_column=Column(JSON))
+    warnings: list = Field(default_factory=list, sa_column=Column(JSON))
+    error: Optional[str] = None
+    created_at: datetime = Field(default_factory=now)
+    completed_at: Optional[datetime] = None
 
 
 class DischargeCard(SQLModel, table=True):

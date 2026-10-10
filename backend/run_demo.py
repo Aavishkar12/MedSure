@@ -11,6 +11,8 @@ import os
 os.environ["DATABASE_URL"] = "sqlite:///./demo.db"
 
 import uvicorn  # noqa: E402
+from app.migrate import upgrade_database  # noqa: E402
 
 if __name__ == "__main__":
+    upgrade_database()
     uvicorn.run("app.main:app", host="0.0.0.0", port=8000)

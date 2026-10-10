@@ -14,6 +14,7 @@ cd backend
 python -m venv .venv
 .venv/Scripts/python -m pip install -r requirements.txt   # macOS/Linux: .venv/bin/python
 cp .env.example .env                                       # then fill in; ask Ravi for the shared values
+.venv/Scripts/python -m app.migrate
 .venv/Scripts/python -m uvicorn app.main:app --reload --host 0.0.0.0
 ```
 
@@ -47,11 +48,74 @@ After sign-in the app calls `PATCH /me` with the sign-up details (`name`, `phone
 | `app/rules.py` | Red-flag rule engine (deterministic, no LLM) |
 | `app/firebase.py`, `app/notify.py` | Token verification and push notifications |
 
-Tables are created on startup but never altered. After changing `models.py`:
+## Database migrations
+
+The schema is managed by Alembic; application startup never silently changes it. Before starting a
+new checkout or deploying a new version, run:
+
+```bash
+.venv/Scripts/python -m app.migrate
+```
+
+This also safely adopts an older MedSure database that was created with `create_all`: it verifies the
+expected tables and columns before recording the baseline, then applies newer migrations. It refuses
+to stamp a partial schema.
+
+After changing `models.py`, generate and review a migration:
+
+```bash
+.venv/Scripts/python -m alembic revision --autogenerate -m "describe the change"
+.venv/Scripts/python -m alembic upgrade head
+```
+
+For a destructive local reset only:
 
 ```bash
 .venv/Scripts/python -m app.reset_db --yes   # deletes all data
 ```
+
+Run database tests with `.venv/Scripts/python -m pytest -q`. Set `DATABASE_URL` to a disposable
+PostgreSQL test database when adding PostgreSQL-specific behavior; never run reset commands against
+the shared Neon database.
+
+## Document processing and app population
+
+OCR runs on the Android device with ML Kit. The backend does not accept PDFs or images and contains no
+cloud OCR implementation. `POST /cases/{case_id}/documents` accepts recognized page text in this shape:
+
+```json
+{
+  "documents": [
+    {
+      "filename": "discharge-summary.jpg",
+      "doc_type": "discharge_summary",
+      "file_hash": null,
+      "pages": [
+        {"page_number": 1, "text": "recognized text", "confidence": 0.96}
+      ],
+      "warnings": []
+    }
+  ]
+}
+```
+
+It returns a processing job. Android polls `GET /jobs/{job_id}`, then reads the database-backed
+extraction, discharge-card and bill endpoints. Raw recognized text is retained for deterministic
+reprocessing but is excluded from document-list responses. Structured JSON lives in
+`document.extraction`; the original medical document stays on the phone.
+
+Leave `DEMO_FALLBACK=false` when verifying real extraction. LLM enrichment can be added after the
+deterministic extraction and persistence path is stable.
+
+## Hosted API and database
+
+The production path is Android -> Render FastAPI -> Neon PostgreSQL. Create the Render service from
+the repository's root `render.yaml`, then provide `DATABASE_URL` and `FIREBASE_CREDENTIALS` in the
+Render dashboard. The Blueprint deploys in Singapore, runs Alembic before every start and verifies the
+database through `/health`. Never enable `AUTH_DEV_BYPASS` on the hosted service.
+
+Use Neon's pooled connection string with `sslmode=require`. After deployment, set Android's
+`medsure.apiUrl` to the Render HTTPS URL. The phone and database then work without a developer laptop.
 
 ## Push notification payload
 

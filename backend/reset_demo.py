@@ -14,10 +14,13 @@ from sqlmodel import SQLModel  # noqa: E402
 
 from app import models  # noqa: E402,F401
 from app.db import engine  # noqa: E402
+from app.migrate import upgrade_database  # noqa: E402
 
 if __name__ == "__main__":
     if "--yes" not in sys.argv:
         sys.exit("This deletes every user, case and check-in in demo.db. Re-run with --yes.")
     SQLModel.metadata.drop_all(engine)
-    SQLModel.metadata.create_all(engine)
+    with engine.begin() as connection:
+        connection.exec_driver_sql("DROP TABLE IF EXISTS alembic_version")
+    upgrade_database()
     print("Demo database is empty. Sign in again on the phones to start a fresh demo.")

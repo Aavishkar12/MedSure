@@ -24,11 +24,12 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.powerbank.medsure.state.MedSureViewModel
 import com.powerbank.medsure.ui.components.D
+import com.powerbank.medsure.ui.components.BtnKind
 import com.powerbank.medsure.ui.components.Ico
 import com.powerbank.medsure.ui.components.LineIcons
+import com.powerbank.medsure.ui.components.MsButton
 import com.powerbank.medsure.ui.components.T
 import com.powerbank.medsure.ui.theme.Ms
-import kotlinx.coroutines.delay
 
 /**
  * Premium loading & preparation screen.
@@ -55,54 +56,13 @@ fun ProcessingScreen(vm: MedSureViewModel) {
         }
     }
 
-    // Processing animation states
-    var completedPills by remember { mutableIntStateOf(0) }
-    var activeStep by remember { mutableIntStateOf(0) }
-    var completedSteps by remember { mutableIntStateOf(0) }
-    var targetProgress by remember { mutableFloatStateOf(0.08f) }
-
-    // Simulated for demo. No real processing happens.
+    // This screen reflects on-device OCR submission and the database parsing job.
     LaunchedEffect(Unit) {
-        // Step 1: Securing your documents (0ms - 1100ms)
-        activeStep = 0
-        targetProgress = 0.28f
-        delay(650)
-        completedPills = 1
-        delay(450)
-        completedSteps = 1
-
-        // Step 2: Reading your discharge papers (1100ms - 2200ms)
-        activeStep = 1
-        targetProgress = 0.52f
-        delay(400)
-        completedPills = 2
-        delay(700)
-        completedSteps = 2
-
-        // Step 3: Setting up your medicine reminders (2200ms - 3300ms)
-        activeStep = 2
-        targetProgress = 0.76f
-        delay(300)
-        completedPills = 3
-        delay(800)
-        completedSteps = 3
-
-        // Step 4: Preparing your home screen (3300ms - 4400ms)
-        activeStep = 3
-        targetProgress = 1.0f
-        delay(250)
-        completedPills = 4
-        delay(850)
-        completedSteps = 4
-        completedPills = 5
-
-        // Hold for 400ms upon final completion, then navigate to Patient Home
-        delay(400)
-        vm.completeProcessing()
+        vm.startProcessing(context)
     }
 
     val progress by animateFloatAsState(
-        targetValue = targetProgress,
+        targetValue = vm.processingProgress,
         animationSpec = if (reduceMotion) snap() else tween(durationMillis = 800, easing = FastOutSlowInEasing),
         label = "sync_progress",
     )
@@ -128,7 +88,7 @@ fun ProcessingScreen(vm: MedSureViewModel) {
             ) {
                 for (i in 0 until 5) {
                     AnimatedBlisterPill(
-                        isCheck = i < completedPills,
+                        isCheck = i < vm.processingCompletedPills,
                         reduceMotion = reduceMotion,
                         modifier = Modifier.weight(1f),
                     )
@@ -142,7 +102,7 @@ fun ProcessingScreen(vm: MedSureViewModel) {
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 D("Setting things up for you", 30, lh = 1.15f)
-                T("Lakshmi, this takes just a moment.", 16, 400, Ms.Text3)
+                T("${vm.onbFullName.substringBefore(' ').ifBlank { "We" }}, this takes just a moment.", 16, 400, Ms.Text3)
             }
         }
 
@@ -159,8 +119,8 @@ fun ProcessingScreen(vm: MedSureViewModel) {
             )
 
             stepTitles.forEachIndexed { index, title ->
-                val isDone = completedSteps > index
-                val isActive = activeStep == index && !isDone
+                val isDone = vm.processingCompletedSteps > index
+                val isActive = vm.processingCompletedSteps.coerceAtMost(3) == index && !isDone
                 ChecklistStepRow(
                     title = title,
                     isDone = isDone,
@@ -184,6 +144,10 @@ fun ProcessingScreen(vm: MedSureViewModel) {
                         .clip(RoundedCornerShape(999.dp))
                         .background(Brush.horizontalGradient(listOf(Ms.Marigold, Ms.Teal)))
                 )
+            }
+            vm.processingError?.let { error ->
+                T(error, 13, 600, Ms.Red)
+                MsButton("Retry", BtnKind.Mari, Modifier.fillMaxWidth()) { vm.startProcessing(context) }
             }
         }
     }

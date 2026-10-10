@@ -100,14 +100,14 @@ as a neutral question for the billing desk, never as an accusation."""
 T = TypeVar("T", bound=BaseModel)
 
 
-def _extract(schema: type[T], task: str, text: str, images: list[bytes]) -> T:
+def _extract(schema: type[T], task: str, text: str) -> T:
     system = RULES + json.dumps(schema.model_json_schema())
-    body = f"Document text:\n{text[:MAX_TEXT_CHARS]}" if text else "The document pages are attached as images."
+    body = f"Document text:\n{text[:MAX_TEXT_CHARS]}"
     user = f"{task}\n\n{body}"
     error = ""
     for _ in range(2):  # one retry with the validation error fed back
         try:
-            return schema.model_validate(complete_json(system, user + error, images or None))
+            return schema.model_validate(complete_json(system, user + error))
         except (ValidationError, json.JSONDecodeError) as e:
             error = f"\n\nYour previous reply was invalid: {str(e)[:1500]}\nReturn corrected JSON only."
     raise ValueError("Model did not return valid data for this document")
@@ -117,15 +117,15 @@ def _clean_concept(value: Optional[str]) -> Optional[str]:
     return value if value in CONCEPTS else None
 
 
-def extract_discharge_card(text: str, images: list[bytes] | None = None) -> dict:
-    card = _extract(DischargeCardData, CARD_TASK, text, images or [])
+def extract_discharge_card(text: str) -> dict:
+    card = _extract(DischargeCardData, CARD_TASK, text)
     for lab in card.lab_values:
         lab.concept = _clean_concept(lab.concept)
     return {**card.model_dump(), "disclaimer": DISCLAIMER}
 
 
-def extract_bill(text: str, images: list[bytes] | None = None) -> list[dict]:
-    bill = _extract(BillData, BILL_TASK, text, images or [])
+def extract_bill(text: str) -> list[dict]:
+    bill = _extract(BillData, BILL_TASK, text)
     for item in bill.items:
         item.concept = _clean_concept(item.concept)
     return [item.model_dump() for item in bill.items]

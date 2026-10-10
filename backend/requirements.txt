@@ -2,8 +2,7 @@ fastapi
 uvicorn[standard]
 sqlmodel
 psycopg2-binary
-python-multipart
+alembic>=1.14,<2
 pydantic-settings
 firebase-admin
 groq
-pymupdf

@@ -1,6 +1,7 @@
 package com.powerbank.medsure.ui.patient
 
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
 import android.provider.OpenableColumns
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -336,6 +337,7 @@ private fun Step3BillsAndInsurance(vm: MedSureViewModel) {
 
     val singlePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
+            runCatching { context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
             vm.onbInsDoc = queryDocInfo(context, uri)
         }
     }
@@ -561,6 +563,9 @@ fun DocumentUploadSection(
     val context = LocalContext.current
     val multiPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         if (uris.isNotEmpty()) {
+            uris.forEach { uri ->
+                runCatching { context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+            }
             val resolved = uris.map { queryDocInfo(context, it) }
             onAddDocs(resolved)
         }

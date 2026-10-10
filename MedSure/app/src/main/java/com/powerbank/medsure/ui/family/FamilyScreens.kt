@@ -211,7 +211,7 @@ fun FamilyBillsScreen(vm: MedSureViewModel) {
                 }
                 Box(Modifier.fillMaxWidth().padding(top = 6.dp).height(2.dp).background(Ms.Ink))
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    D(t["total"], 20); D("₹1,84,350", 24)
+                    D(t["total"], 20); D(vm.billTotalFormatted, 24)
                 }
             }
             Zigzag()

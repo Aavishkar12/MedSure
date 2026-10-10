@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import or_
 from sqlmodel import Session, select
@@ -94,7 +94,12 @@ def add_member(
     """Add a family member by phone or email. They join straight away if they already have an account,
     otherwise as soon as they sign in with that phone or email."""
     require_member(session, case_id, user)
+    membership = session.get(CaseMember, (case_id, user.id))
+    if not membership.can_approve:
+        raise HTTPException(403, "You can view this case but not invite or change family members")
     phone, email = clean_phone(body.phone), clean_email(body.email)
+    if not phone and not email:
+        raise HTTPException(422, "A phone number or email address is required")
     matches = ([User.phone == phone] if phone else []) + ([User.email == email] if email else [])
     existing = session.exec(select(User).where(or_(*matches))).first() if matches else None
     if existing:
