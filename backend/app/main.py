@@ -1,20 +1,13 @@
-from contextlib import asynccontextmanager
-
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
+from sqlalchemy import text
+from sqlmodel import Session
 
-from .db import init_db
+from .db import get_session
 from .routers import cases, checkins, claims, coverage, devices, documents, state
 
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    init_db()
-    yield
-
-
-app = FastAPI(title="MedSure API", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="MedSure API", version="0.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 for r in (devices, cases, documents, coverage, claims, checkins, state):
@@ -27,5 +20,6 @@ def root():
 
 
 @app.get("/health")
-def health():
-    return {"ok": True}
+def health(session: Session = Depends(get_session)):
+    session.exec(text("SELECT 1"))
+    return {"ok": True, "database": "ok"}

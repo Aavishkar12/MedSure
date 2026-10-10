@@ -5,8 +5,7 @@ from app.config import settings
 
 @pytest.fixture(scope="session", autouse=True)
 def isolated_files(tmp_path_factory):
-    """Uploads and extraction JSON go to a temp folder, and no test reaches the real AI service."""
-    settings.extractions_dir = str(tmp_path_factory.mktemp("extractions"))
+    """Uploads go to a temp folder, and no test reaches the real AI service."""
     settings.upload_dir = str(tmp_path_factory.mktemp("uploads"))
     settings.groq_api_key = ""
     settings.firebase_credentials = ""  # tests never send pushes, whatever the developer's .env says

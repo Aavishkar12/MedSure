@@ -16,8 +16,8 @@ Patient-and-family app for the weeks after hospital discharge. See [CONTEXT.md](
 1. Get `google-services.json` from Ravi and put it in `MedSure/app/`. Without it the app builds, but
    sign-in, the backend and push do not work. It is deliberately not in the repo.
 2. Open `MedSure/` in Android Studio and let Gradle sync.
-3. To point the app at a backend, add this line to `MedSure/local.properties` (the file is yours, it is not committed):
-   `medsure.apiUrl=http://<laptop-ip>:8000`
+3. To point the app at the hosted backend, add this line to `MedSure/local.properties` (the file is yours, it is not committed):
+   `medsure.apiUrl=https://<your-render-service>.onrender.com`
    Several addresses can be listed, separated by commas; the app uses the first one that answers.
 4. Optional: for the map on the Help tab, add `maps.apiKey=<Google Maps key>` to `MedSure/local.properties`
    (Maps SDK for Android and Places API (New) enabled). Without it the tab lists nearby care without a map.
