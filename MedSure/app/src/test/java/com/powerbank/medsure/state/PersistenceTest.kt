@@ -169,8 +169,23 @@ class PersistenceTest {
         assertTrue(again.questions[0].first.contains("Fever above 101 F"))
         assertTrue(again.questions[1].first.contains("Yellowing of eyes"))
         assertEquals(3, again.questions.size)
-        // The hospital on the papers is offered on the Help tab.
-        assertEquals(DISCHARGE_HOSPITAL_ID, again.places.first().id)
+        // Places on the Help tab come only from the live search around the phone.
+        assertTrue(again.places.isEmpty())
+    }
+
+    @Test
+    fun filterChipsShowOnlyTheirOwnKindNearestFirst() {
+        val vm = MedSureViewModel(app)
+        vm.rawPlaces.addAll(listOf(
+            Place("h1", "hosp", "City Hospital", "", "1.2 km", "", "", 13.0, 80.0, 1200f),
+            Place("p1", "pharm", "Apollo Pharmacy", "", "300 m", "", "", 13.0, 80.0, 300f),
+            Place("c1", "clinic", "Family Clinic", "", "2.0 km", "", "", 13.0, 80.0, 2000f),
+            Place("h2", "hosp", "District Hospital", "", "41.0 km", "", "", 13.3, 80.2, 41000f),
+        ))
+        vm.filter = "all"; assertEquals(4, vm.places.size)
+        vm.filter = "hosp"; assertEquals(listOf("h1", "h2"), vm.places.map { it.id })
+        vm.filter = "pharm"; assertEquals(listOf("p1"), vm.places.map { it.id })
+        vm.filter = "clinic"; assertEquals(listOf("c1"), vm.places.map { it.id })
     }
 
     @Test
