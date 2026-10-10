@@ -197,3 +197,50 @@ fun rupees(amount: Double): String {
     }
     return (if (whole < 0) "-₹" else "₹") + grouped
 }
+
+// ---------- Insurance policy, claim letter, check-in history ----------
+
+data class PolicyModel(
+    val insurer: String,
+    val policyNumber: String,
+    val sumInsured: Double?,
+    val roomRentLimit: String,
+    val copayPercent: Double?,
+    val claimDeadline: String,
+    val preauth: String,
+    val summary: String,
+)
+
+/** GET /cases/{id}/policy */
+fun parsePolicy(json: JSONObject): PolicyModel {
+    val d = json.optJSONObject("data") ?: JSONObject()
+    fun num(key: String): Double? = if (d.has(key) && !d.isNull(key)) d.optDouble(key).takeIf { !it.isNaN() } else null
+    return PolicyModel(
+        insurer = d.text("insurer"),
+        policyNumber = d.text("policy_number"),
+        sumInsured = num("sum_insured"),
+        roomRentLimit = d.text("room_rent_limit").ifEmpty { num("room_rent_limit_per_day")?.let { rupees(it) + " per day" }.orEmpty() },
+        copayPercent = num("copay_percent"),
+        claimDeadline = d.text("claim_submission_deadline"),
+        preauth = d.text("preauth_requirement"),
+        summary = d.text("plain_summary"),
+    )
+}
+
+/** The AI-drafted claim letter. status: draft -> approved -> sent. Nothing is sent before a family member approves. */
+data class ClaimDraftModel(val id: Int, val body: String, val status: String)
+
+fun parseDraft(json: JSONObject) = ClaimDraftModel(json.optInt("id"), json.text("body"), json.text("status").ifEmpty { "draft" })
+
+/** One day's check-in result: 0 all clear, 1 amber, 2 red. */
+data class CheckinDay(val day: java.time.LocalDate, val level: Int, val note: String)
+
+private val DATE_PATTERNS = listOf("yyyy-MM-dd", "dd-MM-yyyy", "dd/MM/yyyy", "d-M-yyyy", "d/M/yyyy", "dd.MM.yyyy", "d MMM yyyy", "d MMMM yyyy", "dd-MMM-yyyy", "MMM d, yyyy", "MMMM d, yyyy")
+    .map { java.time.format.DateTimeFormatter.ofPattern(it, java.util.Locale.ENGLISH) }
+
+/** A date as hospitals write it ("06-10-2026", "6 Oct 2026", "2026-10-06"), or null when it cannot be read. */
+fun parseDocDate(text: String): java.time.LocalDate? {
+    val clean = text.trim().substringBefore(" at ").substringBefore(",  ").trim()
+    if (clean.isEmpty()) return null
+    return DATE_PATTERNS.firstNotNullOfOrNull { runCatching { java.time.LocalDate.parse(clean, it) }.getOrNull() }
+}

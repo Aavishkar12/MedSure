@@ -34,14 +34,14 @@ fun AddPapersButton(vm: MedSureViewModel, docType: String? = null, kind: BtnKind
     vm.addDocsError?.let { T(it, 13, 400, Ms.Red, lh = 1.4f) }
 }
 
-/** Shown above prototype content while the case has no documents, so sample data is never mistaken for the patient's. */
+/** Shown while the case has no documents yet: everything in the app is built from the patient's own papers. */
 @Composable
-fun SampleBanner(vm: MedSureViewModel) {
-    if (!vm.showingSample) return
+fun PapersPrompt(vm: MedSureViewModel) {
+    if (vm.hasCaseData) return
     val t = vm.tx
     MsCard(bg = Ms.FlagBg, border = Ms.FlagBorder, gap = 10.dp) {
-        T(t["sampleTitle"], 16, 700, Ms.Brown)
-        T(t["sampleBody"], 14, 400, Ms.Brown, lh = 1.45f)
+        T(t["noPapersTitle"], 16, 700, Ms.Brown)
+        T(t["noPapersBody"], 14, 400, Ms.Brown, lh = 1.45f)
         AddPapersButton(vm, kind = BtnKind.Mari)
     }
 }

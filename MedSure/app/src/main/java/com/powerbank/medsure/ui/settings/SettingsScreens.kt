@@ -38,17 +38,17 @@ fun SettingsScreen(vm: MedSureViewModel) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
                 Tick(56.dp, if (p) Ms.Ink else Ms.Marigold) { T(vm.me.take(1), 22, 800, if (p) Ms.Paper else Ms.Ink) }
                 Column {
-                    D(if (p) "Lakshmi R" else vm.me, 22)
+                    D(if (p) vm.patientFullName.ifEmpty { vm.me } else vm.me, 22)
                     T(if (p) t["signedPatient"] else t["signedFamily"], 14, 400, Ms.Muted)
                 }
             }
             Rule(Ms.Blister)
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) { T(t["mobile"], 13, 400, Ms.Muted); T("+91 " + vm.phone.ifBlank { "98765 43210" }, 15, 600) }
+                Column(Modifier.weight(1f)) { T(t["mobile"], 13, 400, Ms.Muted); T(if (vm.phone.isBlank()) "—" else "+91 " + vm.phone, 15, 600) }
                 VerifiedPill(t["verified"])
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) { T(t["email"], 13, 400, Ms.Muted); T(vm.email.ifBlank { "name@example.com" }, 15, 600) }
+                Column(Modifier.weight(1f)) { T(t["email"], 13, 400, Ms.Muted); T(vm.email.ifBlank { "—" }, 15, 600) }
                 VerifiedPill(t["verified"])
             }
         }
@@ -176,7 +176,7 @@ fun AddMemberScreen(vm: MedSureViewModel) {
     Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
         D(if (p) t["addTitleP"] else t["addTitleF"], 30)
         T(if (p) t["addSubP"] else t["addSubF"], 15, 400, Ms.Text3, lh = 1.5f)
-        Field(t["name"], vm.fName, { vm.fName = it }, "Arjun")
+        Field(t["name"], vm.fName, { vm.fName = it }, t["name"])
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
             T(t["relation"], 14, 700, Ms.Text3)
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -238,11 +238,11 @@ fun QuerySheetContent(vm: MedSureViewModel) {
     Caps(t["draftTo"], size = 12)
     MsCard { T(f.draft, 15, 400, lh = 1.55f) }
     if (sent) {
-        T(t["sentEmail"], 15, 600, Ms.GreenFg, Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Ms.GreenBg).padding(14.dp))
+        T(t["sharedNote"], 15, 600, Ms.GreenFg, Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Ms.GreenBg).padding(14.dp))
     } else {
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            MsButton(t["edit"], BtnKind.Light, Modifier.weight(1f)) {}
-            MsButton(t["approveSend"], BtnKind.Primary, Modifier.weight(1f)) { vm.sent[f.id] = true }
+            MsButton(t["notNow"], BtnKind.Light, Modifier.weight(1f)) { vm.sheet = null }
+            MsButton(t["approveShare"], BtnKind.Primary, Modifier.weight(1f)) { vm.sendQuery(f) }
         }
     }
     T(t["nothingLeaves"], 13, 400, Ms.Muted, Modifier.fillMaxWidth(), align = TextAlign.Center)
@@ -253,31 +253,26 @@ fun ApproveSheetContent(vm: MedSureViewModel) {
     val t = vm.tx
     SheetHeader(t["packet"]) { vm.sheet = null }
     val cov = vm.coverage
+    val draft = vm.claimDraft
     MsCard(gap = 10.dp) {
-        if (vm.showingSample) {
-            SheetRow(t["claimed"], "₹1,84,350")
-            SheetRow(t["notPayable"], "− ₹4,920")
-            SheetRow(t["docsAttached"], "${6 - vm.missing} ${t["ofSix"]}")
-        } else {
-            val billed = cov?.billed ?: vm.billData?.total ?: 0.0
-            SheetRow(t["claimed"], rupees(billed))
-            if (cov != null) SheetRow(t["covClaimable"], rupees(cov.estimatedClaimable))
-            val list = vm.checklist
-            SheetRow(t["docsAttached"], "${list.count { it.done }} / ${list.size}")
-        }
+        SheetRow(t["claimed"], rupees(cov?.billed ?: vm.billData?.total ?: 0.0))
+        if (cov != null) SheetRow(t["covClaimable"], rupees(cov.estimatedClaimable))
+        val list = vm.checklist
+        SheetRow(t["docsAttached"], "${list.count { it.done }} / ${list.size}")
     }
-    Caps(t["coverNote"], size = 12)
-    MsCard {
-        T(
-            if (vm.showingSample) "Cashless was declined on 24 Sep because documents were incomplete at admission. We are now claiming reimbursement for Lakshmi's stay from 24 to 29 Sep, with all reports, bills and the completed claim form attached."
-            else listOfNotNull(cov?.headline, cov?.explanation?.takeIf { it.isNotBlank() }).joinToString("\n\n").ifBlank { t["covNeedBoth"] },
-            15, 400, lh = 1.55f,
-        )
-    }
+    Caps(t["letterCaps"], size = 12)
+    MsCard { T(draft?.body ?: t["letterIntro"], 15, 400, lh = 1.55f) }
     if (vm.missing > 0) {
         T(t["missingMsg"], 15, 600, Ms.Brown, Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Ms.FlagBg).padding(14.dp))
     }
-    MsButton(t["approveIns"], BtnKind.Primary, Modifier.fillMaxWidth(), enabled = vm.missing == 0) { vm.approveClaim() }
+    vm.draftError?.let { T(it, 13, 400, Ms.Red, lh = 1.4f) }
+    when {
+        draft == null -> MsButton(if (vm.draftBusy) t["letterWriting"] else t["letterWrite"], BtnKind.Primary, Modifier.fillMaxWidth(),
+            enabled = !vm.draftBusy) { vm.prepareClaimLetter() }
+        draft.status == "sent" -> MsButton(t["shareAgain"], BtnKind.Light, Modifier.fillMaxWidth()) { vm.shareRequest = draft.body }
+        else -> MsButton(if (vm.draftBusy) t["letterWriting"] else t["approveShare"], BtnKind.Primary, Modifier.fillMaxWidth(),
+            enabled = vm.missing == 0 && !vm.draftBusy) { vm.approveClaim() }
+    }
     T(t["nothingLeaves"], 13, 400, Ms.Muted, Modifier.fillMaxWidth(), align = TextAlign.Center)
 }
 

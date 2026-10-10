@@ -130,6 +130,16 @@ private fun AppScaffold(vm: MedSureViewModel) {
         }
     }
 
+    // An approved letter or billing question goes out through the phone's own share sheet (WhatsApp, email...).
+    LaunchedEffect(vm.shareRequest) {
+        vm.shareRequest?.let { text ->
+            val send = android.content.Intent(android.content.Intent.ACTION_SEND).setType("text/plain")
+                .putExtra(android.content.Intent.EXTRA_TEXT, text)
+            runCatching { ctx.startActivity(android.content.Intent.createChooser(send, null)) }
+            vm.shareRequest = null
+        }
+    }
+
     // The countdown lives in the ViewModel; this places the call whichever tab the patient is on.
     LaunchedEffect(vm.dialRequest) {
         vm.dialRequest?.let { number ->

@@ -97,12 +97,13 @@ object Backend {
 
     /** A check-in as stored on the backend. */
     class RemoteCheckin(val id: Int, val levels: List<Int>, val note: String, val createdAt: String) {
-        /** True when it was made today, in this phone's time zone. The server stores UTC. */
-        val isToday: Boolean
+        /** The day it was made, in this phone's time zone. The server stores UTC. */
+        val day: java.time.LocalDate?
             get() = runCatching {
                 val utc = java.time.LocalDateTime.parse(createdAt.removeSuffix("Z").substringBefore('+'))
-                utc.atOffset(java.time.ZoneOffset.UTC).atZoneSameInstant(java.time.ZoneId.systemDefault()).toLocalDate() == java.time.LocalDate.now()
-            }.getOrDefault(true)
+                utc.atOffset(java.time.ZoneOffset.UTC).atZoneSameInstant(java.time.ZoneId.systemDefault()).toLocalDate()
+            }.getOrNull()
+        val isToday: Boolean get() = (day ?: java.time.LocalDate.now()) == java.time.LocalDate.now()
     }
 
     /** The most recent check-in on this case, or null if there is none yet. */
@@ -184,6 +185,36 @@ object Backend {
 
     /** Runs the bill-vs-policy comparison now. */
     suspend fun runCoverage(caseId: Int): JSONObject = JSONObject(request("POST", "/cases/$caseId/coverage"))
+
+    suspend fun getPolicy(caseId: Int): JSONObject? = getOrNull("/cases/$caseId/policy")
+
+    /** The newest AI-drafted claim letter, or null when none has been drafted. */
+    suspend fun getClaimDraft(caseId: Int): JSONObject? = getOrNull("/cases/$caseId/claim-draft")
+
+    /** Asks the AI to draft the claim letter from the case's documents. Always a draft until approved. */
+    suspend fun prepareClaimDraft(caseId: Int): JSONObject =
+        JSONObject(request("POST", "/cases/$caseId/claim-draft", JSONObject().put("kind", "claim_letter")))
+
+    /** A family member who can approve signs off the letter, then it is marked sent. */
+    suspend fun approveAndSendDraft(draftId: Int, alreadyApproved: Boolean = false): JSONObject {
+        if (!alreadyApproved) request("POST", "/drafts/$draftId/approve")
+        return JSONObject(request("POST", "/drafts/$draftId/send"))
+    }
+
+    /** Every check-in on the case, oldest first. */
+    suspend fun checkins(caseId: Int): List<RemoteCheckin> {
+        val all = JSONArray(request("GET", "/cases/$caseId/checkins"))
+        return (0 until all.length()).mapNotNull { i ->
+            val c = all.getJSONObject(i)
+            val answers = c.optJSONObject("answers") ?: return@mapNotNull null
+            val levels = answers.optJSONArray("levels")
+            RemoteCheckin(
+                c.getInt("id"),
+                if (levels == null) listOf(answers.optInt("level")) else List(levels.length()) { levels.getInt(it) },
+                answers.optString("note"), c.getString("created_at"),
+            )
+        }
+    }
 
     /** Rule-based extraction of every document, for the debug screen. */
     suspend fun getCaseExtractions(caseId: Int): JSONObject = JSONObject(request("GET", "/cases/$caseId/extractions"))

@@ -103,11 +103,12 @@ fun TodayScreen(vm: MedSureViewModel) {
             verticalArrangement = Arrangement.spacedBy(2.dp)
         ) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                T(t["date"], 14, 600, Ms.Muted); Dot(); T(t["dayHome"], 14, 600, Ms.Muted)
+                T(vm.todayLabel, 14, 600, Ms.Muted)
+                if (vm.dayHomeLabel.isNotEmpty()) { Dot(); T(vm.dayHomeLabel, 14, 600, Ms.Muted) }
             }
-            D(t["hello"] + "\n" + vm.patientFirstName, 40, lh = 1.05f, modifier = Modifier.padding(top = 4.dp))
+            D(t["hello"] + "\n" + vm.me, 40, lh = 1.05f, modifier = Modifier.padding(top = 4.dp))
         }
-        SampleBanner(vm)
+        PapersPrompt(vm)
 
         MsCard(gap = 14.dp) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
@@ -127,7 +128,7 @@ fun TodayScreen(vm: MedSureViewModel) {
                 row.forEach { d ->
                     Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         Bubble(d.taken, "${d.time} ${d.name}", { vm.toggleDose(d.id) }, Modifier.fillMaxWidth())
-                        T(if (vm.showingSample) d.time else d.name.substringBefore(' ').take(10), 12, 700, align = TextAlign.Center)
+                        T(d.name.removePrefix("Tab ").removePrefix("Cap ").substringBefore(' ').take(10), 12, 700, align = TextAlign.Center)
                     }
                 }
                 repeat(4 - row.size) { Spacer(Modifier.weight(1f)) }
@@ -148,7 +149,7 @@ fun TodayScreen(vm: MedSureViewModel) {
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 D(t["ciCardTitle"], 24, lh = 1.15f)
-                T(t["ciCardBody"], 15, 500, lh = 1.45f)
+                T(t["ciBodyLive"], 15, 500, lh = 1.45f)
                 MsButton(t["startCi"], BtnKind.Primary) { vm.ptab = PTab.Checkin }
             }
         } else {
@@ -191,23 +192,16 @@ fun TodayScreen(vm: MedSureViewModel) {
             }
         }
 
-        val followUp = vm.dischargeCardData?.followUps?.firstOrNull()
-        if (vm.showingSample || followUp != null) MsCard {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                Column(
-                    Modifier.size(58.dp, 64.dp).clip(RoundedCornerShape(14.dp)).background(Ms.Ink),
-                    horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center,
-                ) {
-                    if (followUp == null) {
-                        T(t["mon"], 11, 700, Ms.Paper, spacing = 0.06f)
-                        D("5", 26, color = Ms.Paper, lh = 1f)
-                    } else {
+        vm.dischargeCardData?.followUps?.firstOrNull()?.let { followUp ->
+            MsCard(onClick = { vm.care = "visit"; vm.ptab = PTab.Care }) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                    Box(Modifier.size(58.dp, 64.dp).clip(RoundedCornerShape(14.dp)).background(Ms.Ink), contentAlignment = Alignment.Center) {
                         Ico(LineIcons.Calendar, Ms.Paper, 26.dp)
                     }
-                }
-                Column(Modifier.weight(1f)) {
-                    T(followUp?.text ?: t["followTitle"], 16, 700)
-                    T(followUp?.let { it.sub.ifBlank { pageRef(vm, it.sourcePage) } } ?: t["followSub"], 14, 400, Ms.Muted)
+                    Column(Modifier.weight(1f)) {
+                        T(followUp.text, 16, 700)
+                        T(followUp.sub.ifBlank { pageRef(vm, followUp.sourcePage) }, 14, 400, Ms.Muted)
+                    }
                 }
             }
         }
@@ -230,49 +224,11 @@ fun CareScreen(vm: MedSureViewModel) {
         Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             tabs.forEach { (id, label) -> Chip(label, vm.care == id) { vm.care = id } }
         }
-        SampleBanner(vm)
         val card = vm.dischargeCardData
-        if (!vm.showingSample && card == null) {
+        if (card == null) {
             MsCard(gap = 12.dp) {
                 T(if (vm.caseDocuments.any { it.status == "processing" }) t["cardReading"] else t["noCard"], 16, 400, lh = 1.5f)
                 AddPapersButton(vm)
-            }
-        } else if (card == null) MsCard(gap = 12.dp) {
-            when (vm.care) {
-                "watch" -> {
-                    D(t["cWatch"], 24)
-                    listOf(t["watch1"], t["watch2"], t["watch3"]).forEach { w ->
-                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                            Ico(LineIcons.Alert, Ms.Warn); T(w, 17, 400)
-                        }
-                    }
-                    T(t["call108line"], 15, 600, Color.White, Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Ms.Red).padding(horizontal = 14.dp, vertical = 12.dp))
-                    T("${t["src"]} 4", 13, 400, Ms.Muted)
-                }
-                "meds" -> {
-                    D(t["cMeds"], 24)
-                    vm.doses.forEach { d ->
-                        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                            T(d.time, 14, 800, modifier = Modifier.width(66.dp))
-                            Column {
-                                T(d.name, 16, 700)
-                                T(d.why, 15, 400, Ms.Muted)
-                            }
-                        }
-                    }
-                    T("${t["src"]} 3", 13, 400, Ms.Muted)
-                }
-                "visit" -> {
-                    D(t["cVisit"], 24)
-                    T(t["visitBody"], 18, 400, lh = 1.5f)
-                    T(t["visitBring"], 16, 400, Ms.Text3, lh = 1.5f)
-                    T("${t["src"]} 4", 13, 400, Ms.Muted)
-                }
-                else -> {
-                    D(t["cHappened"], 24)
-                    T(t["happenedBody"], 18, 400, lh = 1.55f)
-                    T("${t["src"]} 1", 13, 400, Ms.Muted)
-                }
             }
         } else MsCard(gap = 12.dp) {
             when (vm.care) {

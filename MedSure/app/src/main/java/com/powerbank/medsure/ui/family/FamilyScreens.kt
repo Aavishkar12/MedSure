@@ -17,6 +17,7 @@ import androidx.compose.ui.unit.dp
 import com.powerbank.medsure.state.FTab
 import com.powerbank.medsure.state.MedSureViewModel
 import com.powerbank.medsure.state.Sheet
+import com.powerbank.medsure.state.rupees
 import com.powerbank.medsure.ui.components.*
 import com.powerbank.medsure.ui.patient.*
 import com.powerbank.medsure.ui.theme.Ms
@@ -27,7 +28,8 @@ import com.powerbank.medsure.ui.theme.Ms
 fun FamilyCircleList(vm: MedSureViewModel) {
     val t = vm.tx
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        CircleRow("L", "Lakshmi", t["patientRole"], Ms.Ink, Ms.Paper)
+        val patient = vm.patientFullName
+        if (patient.isNotEmpty()) CircleRow(patient.take(1).uppercase(), patient, t["patientRole"], Ms.Ink, Ms.Paper)
         vm.members.forEachIndexed { i, m ->
             val bg = if (i % 2 == 1) Ms.Teal else Ms.Marigold
             val fg = if (i % 2 == 1) Color.White else Ms.Ink
@@ -53,7 +55,7 @@ fun FamilyHomeScreen(vm: MedSureViewModel) {
     val L = vm.level
     Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
         Column(Modifier.padding(top = 6.dp)) {
-            T(t["caring"], 14, 600, Ms.Muted)
+            T(listOf(vm.named("caringN"), vm.dayHomeLabel).filter { it.isNotEmpty() }.joinToString(" · "), 14, 600, Ms.Muted)
             D(vm.famHead, 32, modifier = Modifier.padding(top = 4.dp))
         }
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.height(IntrinsicSize.Min)) {
@@ -74,9 +76,10 @@ fun FamilyHomeScreen(vm: MedSureViewModel) {
                 val fg = if (vm.ciDone) L.fg else Ms.Ink
                 T(t["ciCap"], 12, 800, fg)
                 D(if (vm.ciDone) L.name else t["notYet"], 24, color = fg)
-                T(if (vm.ciDone) t["fromAmma"] else t["remSent"], 13, 600, fg)
+                T(if (vm.ciDone) vm.named("fromN") else t["noCiToday"], 13, 600, fg)
             }
         }
+        PapersPrompt(vm)
         D(t["waiting"], 22, modifier = Modifier.padding(top = 4.dp))
         val approvals = vm.approvals
         if (approvals.isEmpty()) MsCard { T(t["nothing"], 15, 400, Ms.Muted) }
@@ -107,30 +110,10 @@ fun FamilyMedsScreen(vm: MedSureViewModel) {
     val t = vm.tx
     Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
         Column(Modifier.padding(top = 6.dp)) {
-            D(t["fmTitle"], 32)
+            D(vm.named("fmTitleN"), 32)
             T(t["fmSub"], 14, 400, Ms.Muted, Modifier.padding(top = 6.dp), lh = 1.45f)
         }
-        SampleBanner(vm)
-        if (vm.showingSample) when (vm.medChange) {
-            "pending" -> Column(
-                Modifier.fillMaxWidth().clip(RoundedCornerShape(22.dp)).background(Ms.FlagBg)
-                    .dashedBorder(Ms.FlagBorder, 1.5.dp, 22.dp).padding(18.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                Caps(t["pendTitle"], Ms.AmberDark, 12)
-                D(t["changeTxt"], 22, lh = 1.2f)
-                T(t["changeSrc"], 14, 400, Ms.Brown, lh = 1.5f)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    MsButton(t["askDoc"], BtnKind.Light, Modifier.weight(1f)) { vm.changeMed("held") }
-                    MsButton(t["approveChg"], BtnKind.Primary, Modifier.weight(1f)) { vm.changeMed("approved") }
-                }
-            }
-            "approved" -> T(t["chgApproved"], 15, 600, Ms.GreenFg, Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(Ms.GreenBg).padding(16.dp))
-            else -> MsCard(gap = 10.dp) {
-                T(t["chgHeld"], 15, 600)
-                MsButton(t["approveChg"], BtnKind.Primary, height = 44.dp) { vm.changeMed("approved") }
-            }
-        }
+        PapersPrompt(vm)
         D(t["todayDoses"], 22)
         MsCard(gap = 14.dp) {
             if (vm.doses.isEmpty()) EmptyNote(if (vm.dischargeCardData == null) t["noCard"] else t["noMeds"])
@@ -179,10 +162,9 @@ fun FamilyBillsScreen(vm: MedSureViewModel) {
     Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
         Column(Modifier.padding(top = 6.dp)) {
             D(t["billTitle"], 32)
-            T(t["billSub"], 14, 400, Ms.Muted, Modifier.padding(top = 6.dp))
+            if (vm.stayLabel.isNotEmpty()) T("${t["billFor"]} ${vm.stayLabel}", 14, 400, Ms.Muted, Modifier.padding(top = 6.dp))
         }
-        SampleBanner(vm)
-        if (!vm.showingSample && vm.billData == null) {
+        if (vm.billData == null) {
             MsCard(gap = 12.dp) {
                 EmptyNote(t["noBill"])
                 AddPapersButton(vm, docType = "bill")
@@ -195,7 +177,7 @@ fun FamilyBillsScreen(vm: MedSureViewModel) {
                     .padding(start = 18.dp, end = 18.dp, top = 20.dp, bottom = 10.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                T(if (vm.showingSample) "[HOSPITAL NAME] · IP [NUMBER]" else vm.hospitalName.uppercase(), 12, 800, Ms.Muted, spacing = 0.12f)
+                if (vm.hospitalName.isNotEmpty()) T(vm.hospitalName.uppercase(), 12, 800, Ms.Muted, spacing = 0.12f)
                 vm.billRows.forEach { (label, amt) ->
                     Column {
                         Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.SpaceBetween) {
@@ -231,27 +213,12 @@ fun FamilyBillsScreen(vm: MedSureViewModel) {
             }
             Zigzag()
         }
-        if (vm.showingSample) D(t["whoPaid"], 22)
-        if (vm.showingSample) MsCard(gap = 12.dp) {
-            Row(Modifier.fillMaxWidth().height(14.dp).clip(RoundedCornerShape(999.dp)), horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-                Box(Modifier.weight(120000f).fillMaxHeight().background(Ms.Marigold))
-                Box(Modifier.weight(40000f).fillMaxHeight().background(Ms.Teal))
-                Box(Modifier.weight(24350f).fillMaxHeight().background(Ms.Taken))
+        vm.coverage?.let { cov ->
+            MsCard(gap = 8.dp, onClick = { vm.ftab = FTab.Claim }) {
+                T(t["covTitle"], 15, 700)
+                T(cov.headline, 15, 400, Ms.Text3, lh = 1.45f)
             }
-            PayRow(Ms.Marigold, "${vm.me} · UPI, 29 Sep", "₹1,20,000")
-            PayRow(Ms.Teal, "Meera · card, 29 Sep", "₹40,000")
-            PayRow(Ms.Taken, t["stillPay"], "₹24,350")
         }
-    }
-}
-
-@Composable
-private fun PayRow(color: Color, label: String, amt: String) {
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Box(Modifier.size(12.dp).clip(RoundedCornerShape(4.dp)).background(color)); T(label, 15)
-        }
-        T(amt, 15, 700)
     }
 }
 
@@ -263,42 +230,52 @@ fun FamilyClaimScreen(vm: MedSureViewModel) {
     Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
         Column(Modifier.padding(top = 6.dp)) {
             D(t["claimTitle"], 32)
-            val sub = if (vm.showingSample) t["claimSub"] else listOfNotNull(
-                vm.coverage?.insurer?.takeIf { it.isNotBlank() }, vm.coverage?.policyNumber?.takeIf { it.isNotBlank() },
-            ).joinToString(" · ")
+            val sub = listOfNotNull(vm.policy?.insurer?.takeIf { it.isNotBlank() }, vm.policy?.policyNumber?.takeIf { it.isNotBlank() }).joinToString(" · ")
             if (sub.isNotBlank()) T(sub, 14, 400, Ms.Muted, Modifier.padding(top = 6.dp))
         }
-        SampleBanner(vm)
-        if (vm.showingSample) Row(
-            Modifier.fillMaxWidth().clip(RoundedCornerShape(22.dp)).background(Ms.Ink).padding(18.dp),
-            horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column {
-                T(t["submitBy"], 13, 700, Ms.OnDark)
-                D(t["daysLeft"], 28, color = Ms.Paper)
+        PapersPrompt(vm)
+        vm.claimDeadline?.let { (title, sub) ->
+            Row(
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(22.dp)).background(Ms.Ink).padding(18.dp),
+                horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    T(title.uppercase(), 13, 700, Ms.OnDark)
+                    D(sub, 24, color = Ms.Paper)
+                }
+                Ico(LineIcons.Clock, Ms.Marigold, 30.dp)
             }
-            Ico(LineIcons.Clock, Ms.Marigold, 30.dp)
         }
         MsCard {
-            val track = vm.track
-            track.forEachIndexed { i, (label, sub) ->
-                val done = i < vm.curStep; val now = i == vm.curStep; val bad = i == 1
-                val dot = when { bad -> Ms.Red; done -> Ms.Teal; now -> Ms.Marigold; else -> Color.White }
-                val ring = when { bad -> Ms.Red; done -> Ms.Teal; now -> Ms.Ink; else -> Ms.Handle }
-                val line = if (i == track.lastIndex) Color.Transparent else if (i < vm.curStep) Ms.Teal else Ms.Line
+            val steps = vm.claimSteps
+            steps.forEachIndexed { i, (label, sub, done) ->
+                val now = i == vm.curStep
+                val dot = when { done -> Ms.Teal; now -> Ms.Marigold; else -> Color.White }
+                val ring = when { done -> Ms.Teal; now -> Ms.Ink; else -> Ms.Handle }
+                val line = if (i == steps.lastIndex) Color.Transparent else if (done) Ms.Teal else Ms.Line
                 Row(Modifier.height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
                     Column(Modifier.fillMaxHeight(), horizontalAlignment = Alignment.CenterHorizontally) {
                         Box(Modifier.size(18.dp).clip(CircleShape).background(dot).border(3.dp, ring, CircleShape))
                         Box(Modifier.width(2.dp).weight(1f).heightIn(min = 22.dp).background(line))
                     }
                     Column(Modifier.padding(bottom = 14.dp)) {
-                        T(label, 15, 700, if (i > vm.curStep) Ms.Muted2 else Ms.Ink)
+                        T(label, 15, 700, if (done || now) Ms.Ink else Ms.Muted2)
                         T(sub, 13, 400, Ms.Muted)
                     }
                 }
             }
         }
-        if (!vm.showingSample) CoverageSection(vm)
+        vm.policy?.let { p ->
+            D(t["yourPolicy"], 22)
+            MsCard(gap = 8.dp) {
+                if (p.summary.isNotBlank()) T(p.summary, 15, 400, Ms.Text3, lh = 1.5f)
+                p.sumInsured?.let { PolicyRow(t["sumInsured"], rupees(it)) }
+                if (p.roomRentLimit.isNotBlank()) PolicyRow(t["roomLimit"], p.roomRentLimit)
+                p.copayPercent?.takeIf { it > 0 }?.let { PolicyRow(t["copayLbl"], "${it.toInt()}%") }
+                if (p.preauth.isNotBlank()) T(p.preauth, 13, 400, Ms.Muted, lh = 1.4f)
+            }
+        }
+        CoverageSection(vm)
         D(t["docs"], 22)
         MsCard(gap = 12.dp) {
             vm.checklist.forEach { k ->
@@ -310,13 +287,40 @@ fun FamilyClaimScreen(vm: MedSureViewModel) {
                         T(k.name, 15, 700)
                         T(k.sub, 13, 400, if (k.done) Ms.Muted else Ms.AmberText)
                     }
-                    if (!k.done && k.fix != null) MsButton(k.fixLabel, BtnKind.Mari, height = 44.dp, fontSize = 14, hPad = 12.dp) { k.fix?.invoke() }
                 }
             }
+            AddPapersButton(vm)
         }
-        if (!vm.showingSample && vm.missing > 0) AddPapersButton(vm)
-        if (vm.approved) T(t["sentIns"], 15, 600, Ms.GreenFg, Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(Ms.GreenBg).padding(16.dp))
-        else MsButton(t["review"], BtnKind.Primary, Modifier.fillMaxWidth()) { vm.sheet = Sheet.Approve }
+        D(t["claimLetter"], 22)
+        val draft = vm.claimDraft
+        MsCard(gap = 12.dp) {
+            when {
+                draft == null -> {
+                    T(t["letterIntro"], 15, 400, Ms.Text3, lh = 1.45f)
+                    MsButton(if (vm.draftBusy) t["letterWriting"] else t["letterWrite"], BtnKind.Primary, Modifier.fillMaxWidth(),
+                        enabled = !vm.draftBusy && vm.hasCaseData) { vm.prepareClaimLetter() }
+                }
+                else -> {
+                    T(when (draft.status) { "sent" -> t["csSentDone"]; "approved" -> t["csLetterOk"]; else -> t["csLetterDraft"] },
+                        13, 800, if (vm.approved) Ms.GreenFg else Ms.AmberText)
+                    T(draft.body, 14, 400, lh = 1.5f, maxLines = 8, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        MsButton(t["review"], BtnKind.Primary, Modifier.weight(1f), height = 46.dp) { vm.sheet = Sheet.Approve }
+                        if (draft.status != "sent") MsButton(if (vm.draftBusy) t["letterWriting"] else t["letterRedo"], BtnKind.Light, Modifier.weight(1f),
+                            enabled = !vm.draftBusy, height = 46.dp) { vm.prepareClaimLetter() }
+                    }
+                }
+            }
+            vm.draftError?.let { T(it, 13, 400, Ms.Red, lh = 1.4f) }
+        }
+        T(t["nothingLeaves"], 13, 400, Ms.Muted, Modifier.fillMaxWidth(), align = androidx.compose.ui.text.style.TextAlign.Center)
+    }
+}
+
+@Composable
+private fun PolicyRow(label: String, value: String) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        T(label, 14, 400, Ms.Muted, Modifier.weight(1f)); T(value, 14, 700)
     }
 }
 
@@ -326,26 +330,24 @@ fun FamilyClaimScreen(vm: MedSureViewModel) {
 @Composable
 fun FamilyRecoveryScreen(vm: MedSureViewModel) {
     val t = vm.tx
-    val L = vm.level
-    val past = listOf(Ms.GreenDot, Ms.GreenDot, Ms.AmberDot, Ms.GreenDot, Ms.GreenDot, Ms.GreenDot)
     Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
         Column(Modifier.padding(top = 6.dp)) {
-            D(t["recTitle"], 32)
+            D(vm.named("recTitleN"), 32)
             T(t["recSub"], 14, 400, Ms.Muted, Modifier.padding(top = 6.dp))
         }
         MsCard(gap = 14.dp) {
             T(t["weekLbl"], 15, 700)
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                t.days.forEachIndexed { i, d ->
+                vm.week.forEach { (day, level) ->
                     Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        val shape = RoundedCornerShape(12.dp)
-                        val box = Modifier.fillMaxWidth().aspectRatio(1f).clip(shape)
-                        when {
-                            i < 6 -> Box(box.background(past[i]))
-                            vm.ciDone -> Box(box.background(L.dot))
-                            else -> Box(box.dashedBorder(Ms.Pale, 1.5.dp, 12.dp, 4.dp, 3.dp))
+                        val box = Modifier.fillMaxWidth().aspectRatio(1f).clip(RoundedCornerShape(12.dp))
+                        when (level) {
+                            null -> Box(box.dashedBorder(Ms.Pale, 1.5.dp, 12.dp, 4.dp, 3.dp))
+                            0 -> Box(box.background(Ms.GreenDot))
+                            1 -> Box(box.background(Ms.AmberDot))
+                            else -> Box(box.background(Ms.Red))
                         }
-                        T(d, 11, 700, Ms.Muted)
+                        T(day, 11, 700, Ms.Muted)
                     }
                 }
             }
@@ -355,18 +357,21 @@ fun FamilyRecoveryScreen(vm: MedSureViewModel) {
         }
         if (vm.noteSaved.isNotEmpty()) {
             MsCard(border = Ms.Ink, borderWidth = 1.5.dp, gap = 8.dp) {
-                T(t["famNote"], 15, 700)
+                T(vm.named("noteTodayN"), 15, 700)
                 T(vm.noteSaved, 15, 400, Ms.Text3, lh = 1.5f)
             }
         }
-        MsCard(gap = 8.dp) {
-            T(t["sunTitle"], 15, 700)
-            T(t["sunBody"], 15, 400, Ms.Text3, lh = 1.5f)
+        vm.flaggedDays.forEach { d ->
+            MsCard(gap = 8.dp) {
+                val date = d.day.format(java.time.format.DateTimeFormatter.ofPattern("EEEE, d MMM", java.util.Locale.ENGLISH))
+                T("$date · ${if (d.level >= 2) t["legRed"] else t["legAmber"]}", 15, 700)
+                T(d.note.ifBlank { t["flagNoNote"] }, 15, 400, Ms.Text3, lh = 1.5f)
+            }
         }
         MsCard(gap = 10.dp) {
-            T(t["scanTitle"], 15, 700)
+            T(t["scanTitleLive"], 15, 700)
             T(t["scanBody"], 14, 400, Ms.Muted, lh = 1.45f)
-            MsButton(t["openCam"], BtnKind.Primary, icon = LineIcons.Camera) {}
+            AddPapersButton(vm)
         }
     }
 }

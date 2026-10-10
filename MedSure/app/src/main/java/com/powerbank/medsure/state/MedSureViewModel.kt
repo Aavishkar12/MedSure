@@ -75,6 +75,9 @@ const val NEXT_CALL_COUNTDOWN_SECONDS = 3
 private val KNOWN_RELATIONS = setOf("son", "daughter", "spouse", "other")
 
 /** Papers an insurance claim needs: upload category, label key, and whether the claim cannot go without it. */
+/** Id of the Help-tab entry for the hospital named on the discharge papers. */
+const val DISCHARGE_HOSPITAL_ID = "discharge-hospital"
+
 private val CLAIM_PAPERS = listOf(
     Triple("discharge_summary", "cpDischarge", true),
     Triple("bill", "cpBill", true),
@@ -138,7 +141,7 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
     var fEmail by mutableStateOf("")
 
     // Patient
-    val taken = mutableStateMapOf("d1" to true, "d2" to true, "d3" to false, "d4" to false)
+    val taken = mutableStateMapOf<String, Boolean>()
     var step by mutableIntStateOf(0)
     val ans = mutableStateListOf<Int>()
     var listening by mutableStateOf(false)
@@ -155,7 +158,6 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
     val sent = mutableStateMapOf<String, Boolean>()
     var k4 by mutableStateOf(false)
     var k5 by mutableStateOf(false)
-    var approved by mutableStateOf(false)
     var medChange by mutableStateOf("pending")
     var plan by mutableStateOf("stay")
     var plus by mutableStateOf(false)
@@ -300,8 +302,7 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
     fun verify() {
         if (!canVerify) return
         if (loginRole == Role.Family) {
-            if (members.isEmpty()) members.add(Member("Arjun", "son", "approve", true, phone = normalizePhone(phone)))
-            else members.indices.forEach { i -> members[i] = members[i].copy(you = i == 0) }
+            members.clear() // the family circle arrives from the backend once this phone is matched to a case
             role = Role.Family
             overlay = null; ptab = PTab.Today; ftab = FTab.Home
             stage = Stage.App
@@ -346,12 +347,15 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
         onbReports.clear(); onbBills.clear(); onbInsCompany = ""; onbInsPolicy = ""; onbInsDoc = null
         onbFamilyMembers.clear()
         step = 0; ans.clear(); listening = false; note = ""; noteSaved = ""
-        taken.clear(); taken.putAll(mapOf("d1" to true, "d2" to true, "d3" to false, "d4" to false))
-        medChange = "pending"; sent.clear(); k4 = false; k5 = false; approved = false
+        taken.clear()
+        medChange = "pending"; sent.clear(); k4 = false; k5 = false
         caseId = null; lastCheckinId = null; sentNote = ""; patientName = ""
         processingJob?.cancel(); processingError = null; uploadedDocs.clear(); extractedData = null
         dischargeCardData = null; billData = null; coverage = null; caseDocuments.clear(); rawPlaces.clear()
         cardJson = null; billJson = null; coverageJson = null; documentsJson = null
+        policy = null; policyJson = null; claimDraft = null; claimDraftJson = null; draftError = null
+        checkinDays.clear(); shareRequest = null; addDocsError = null
+        fName = ""; fPhone = ""; fEmail = ""
         sessionStale = true; pendingCheckin = false; stateDirty = false
         sync("Sign-out") { Backend.signOut() }
     }
@@ -382,6 +386,9 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
     private var billJson: String? = null
     private var coverageJson: String? = null
     private var documentsJson: String? = null
+    var policy by mutableStateOf<PolicyModel?>(null)
+    private var policyJson: String? = null
+    private var claimDraftJson: String? = null
 
     init {
         viewModelScope.launch { PushBus.events.collect { refresh() } }
@@ -496,6 +503,18 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
         runCatching { Backend.getCoverage(id) }.onSuccess { json ->
             coverageJson = json?.toString(); coverage = json?.let(::parseCoverage)
         }.onFailure { Log.w("MedSure", "Coverage fetch failed", it) }
+        runCatching { Backend.getPolicy(id) }.onSuccess { json ->
+            policyJson = json?.toString(); policy = json?.let(::parsePolicy)
+        }.onFailure { Log.w("MedSure", "Policy fetch failed", it) }
+        if (!draftBusy) runCatching { Backend.getClaimDraft(id) }.onSuccess { json ->
+            claimDraftJson = json?.toString(); claimDraft = json?.let(::parseDraft)
+        }.onFailure { Log.w("MedSure", "Claim letter fetch failed", it) }
+        runCatching { Backend.checkins(id) }.onSuccess { all ->
+            // One result per day: the latest check-in made that day.
+            val days = all.mapNotNull { c -> c.day?.let { CheckinDay(it, c.levels.maxOrNull() ?: 0, c.note) } }
+                .groupBy { it.day }.map { it.value.last() }.sortedBy { it.day }
+            if (days != checkinDays.toList()) { checkinDays.clear(); checkinDays.addAll(days) }
+        }.onFailure { Log.w("MedSure", "Check-ins fetch failed", it) }
     }
 
     private fun setDocuments(list: List<DocumentInfoModel>) {
@@ -599,46 +618,46 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
         send("Invite")
     }
 
-    val me: String get() = if (isPatient) onbFullName.trim().substringBefore(' ').ifEmpty { "Lakshmi" } else (members.firstOrNull { it.you }?.name ?: "Arjun")
+    /** The signed-in person's first name: what they typed, or what the case knows them as. */
+    val me: String
+        get() {
+            val name = if (isPatient) onbFullName.ifBlank { patientName } else members.firstOrNull { it.you }?.name.orEmpty()
+            return name.trim().substringBefore(' ').ifEmpty { tx["meFallback"] }
+        }
 
-    /** The patient's first name as the case knows it. */
+    /** The patient's name as the case knows it. */
     var patientName by mutableStateOf("")
         private set
-    val patientFirstName: String get() = (if (isPatient) onbFullName else patientName).trim().substringBefore(' ').ifEmpty { "Lakshmi" }
+    val patientFullName: String get() = (if (isPatient) onbFullName.ifBlank { patientName } else patientName).trim()
+    val patientFirstName: String get() = patientFullName.substringBefore(' ').ifEmpty { tx["patientFallback"] }
+
+    /** Dictionary text with the patient's name filled in. */
+    fun named(key: String) = tx[key].replace("{name}", patientFirstName)
+
+    // ---------- Today ----------
+    val todayLabel: String get() = LocalDate.now().format(java.time.format.DateTimeFormatter.ofPattern("EEE, d MMM", java.util.Locale.ENGLISH))
+
+    /** "Day 3 at home", counted from the discharge date on the papers. Empty when that date is not known. */
+    val dayHomeLabel: String
+        get() {
+            val discharged = dischargeCardData?.dischargeDate?.let(::parseDocDate) ?: return ""
+            val day = java.time.temporal.ChronoUnit.DAYS.between(discharged, LocalDate.now()) + 1
+            return if (day in 1..365) tx["dayAtHome"].replace("{n}", day.toString()) else ""
+        }
 
     fun relLabel(rel: String) = tx["r" + rel.replaceFirstChar { it.uppercase() }]
     fun roleLabel(r: String) = if (r == "approve") tx["canApprove"] else tx["canView"]
 
     // ---------- Medicines ----------
-    /**
-     * True once this case has documents on the backend. From then on every screen shows only what was
-     * read from them; the prototype's sample patient is shown (and labelled) only before any upload.
-     */
+    /** True once this case has documents on the backend. */
     val hasCaseData get() = caseDocuments.isNotEmpty() || dischargeCardData != null || billData != null
-    val showingSample get() = !hasCaseData
 
-    /** Medicines from the Discharge Card. Sample doses only while nothing has been uploaded. */
+    /** Medicines from the Discharge Card (with prescriptions merged in by the backend). */
     val doses: List<Dose>
-        get() {
-            val card = dischargeCardData
-            if (card != null || hasCaseData) {
-                return card?.medicines.orEmpty().mapIndexed { i, m ->
-                    val id = "med_$i"
-                    val what = listOf(m.dose, m.days?.let { "$it days" }.orEmpty()).filter { it.isNotBlank() }.joinToString(" · ")
-                    Dose(id, m.name, m.schedule.ifBlank { tx["asDirected"] }, what, m.purpose, taken[id] == true)
-                }
-            }
-            val t = tx
-            val changed = medChange == "approved"
-            val base = listOf(
-                Triple("d1", if (changed) "Furosemide 20 mg" else "Furosemide 40 mg", "dW" to "whyW"),
-                Triple("d2", "Metoprolol 25 mg", "dH" to "whyH"),
-                Triple("d3", "Spironolactone 25 mg", "dS" to "whyS"),
-                Triple("d4", "Metoprolol 25 mg", "dH" to "whyH2"),
-            )
-            return base.mapIndexed { i, (id, name, keys) ->
-                Dose(id, name, t.times[i], t[keys.first], t[keys.second], taken[id] == true)
-            }
+        get() = dischargeCardData?.medicines.orEmpty().mapIndexed { i, m ->
+            val id = "med_$i"
+            val what = listOf(m.dose, m.days?.let { "$it days" }.orEmpty()).filter { it.isNotBlank() }.joinToString(" · ")
+            Dose(id, m.name, m.schedule.ifBlank { tx["asDirected"] }, what, m.purpose, taken[id] == true)
         }
     val takenCount get() = doses.count { it.taken }
     fun toggleDose(id: String) {
@@ -654,14 +673,21 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     // ---------- Check-in ----------
+    /**
+     * Three questions. The first two ask about the warning signs written on the patient's own discharge
+     * papers (general questions when there are none); the third is about trouble with medicines.
+     * Scoring is fixed: 0 fine, 1 keep watch, 2 needs help now. No AI decides the result.
+     */
     val questions: List<Pair<String, List<Pair<String, Int>>>>
         get() {
             val t = tx
-            return listOf(
-                t["q1"] to listOf(t["q1a"] to 0, t["q1b"] to 1, t["q1c"] to 2),
-                t["q2"] to listOf(t["q2a"] to 0, t["q2b"] to 0, t["q2c"] to 1),
-                t["q3"] to listOf(t["q3a"] to 0, t["q3b"] to 1, t["q3c"] to 1, t["q3d"] to 1),
-            )
+            val yesNo = listOf(t["ansNo"] to 0, t["ansLittle"] to 1, t["ansYes"] to 2)
+            val signs = dischargeCardData?.warningSigns.orEmpty().map { it.text.trim().trimEnd('.') }.filter { it.length in 3..140 }.take(2)
+            val list = signs.map { t["qSign"].replace("{sign}", it) to yesNo }.toMutableList()
+            if (list.isEmpty()) list += t["qFeel"] to listOf(t["qFeelA"] to 0, t["qFeelB"] to 1, t["qFeelC"] to 2)
+            if (list.size < 2) list += t["qNew"] to yesNo
+            list += t["q3"] to listOf(t["q3a"] to 0, t["q3b"] to 1, t["q3c"] to 1, t["q3d"] to 1)
+            return list
         }
     val asking get() = step < 3
     val ciDone get() = step >= 3
@@ -672,7 +698,7 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
             return when (levelIndex) {
                 0 -> Level(t["lvl0"], t["lvl0caps"], t["lvl0t"], t["lvl0b"], Ms.GreenBg, Ms.GreenFg, Ms.GreenDot)
                 1 -> Level(t["lvl1"], t["lvl1caps"], t["lvl1t"], t["lvl1b"], Ms.AmberBg, Ms.AmberFg, Ms.AmberDot)
-                else -> Level(t["lvl2"], t["lvl2caps"], t["lvl2t"], t["lvl2b"], Ms.Red, Color.White, Ms.Red)
+                else -> Level(t["lvl2"], t["lvl2caps"], t["lvl2t"], t["lvl2bLive"], Ms.Red, Color.White, Ms.Red)
             }
         }
     val medWarn get() = !asking && (ans.getOrNull(2) ?: 0) > 0
@@ -763,18 +789,15 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---------- Help ----------
     var rawPlaces = mutableStateListOf<Place>()
+    /** Places found near the phone, with the hospital that discharged the patient listed first. */
     val places: List<Place>
         get() {
-            if (rawPlaces.isNotEmpty()) {
-                return rawPlaces.filter { filter == "all" || it.type == filter }
+            val list = rawPlaces.toMutableList()
+            val own = hospitalName
+            if (own.isNotBlank() && list.none { it.name.equals(own, ignoreCase = true) }) {
+                list.add(0, Place(DISCHARGE_HOSPITAL_ID, "hosp", own, tx["yourHospital"], "", "", tx["knows"]))
             }
-            val t = tx
-            return listOf(
-                Place("h1", "hosp", "[Your discharging hospital]", t["m1"], "4.6 km", t["o24"], t["knows"]),
-                Place("h2", "hosp", "[Nearest 24×7 hospital]", t["m2"], "1.2 km", t["o24"], ""),
-                Place("c1", "clinic", "[Nearest clinic]", t["m3"], "0.6 km", t["o9"], ""),
-                Place("p1", "pharm", "[Nearest pharmacy]", t["m4"], "0.3 km", t["o10"], ""),
-            ).filter { filter == "all" || it.type == filter }
+            return list.filter { filter == "all" || it.type == filter }
         }
 
     // ---------- Bills ----------
@@ -782,37 +805,30 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
     val flags: List<Flag>
         get() {
             val t = tx
-            val n = me
-            val patient = patientFirstName
-            if (hasCaseData) {
-                return billData?.items.orEmpty().filter { it.worthAsking }.map { item ->
-                    val amt = rupees(item.amount)
-                    val reason = item.askReason.ifBlank { t["askDefault"] }
-                    Flag("b${item.id}", item.description, amt, reason, item.explanation.ifBlank { reason },
-                        "Hello, this is $n, family of $patient. On the final bill, \"${item.description}\" is charged $amt. $reason Thank you.")
-                }
+            return billData?.items.orEmpty().filter { it.worthAsking }.map { item ->
+                val amt = rupees(item.amount)
+                val reason = item.askReason.ifBlank { t["askDefault"] }
+                Flag("b${item.id}", item.description, amt, reason, item.explanation.ifBlank { reason },
+                    "Hello, this is $me, family of $patientFullName. On the final bill, \"${item.description}\" is charged $amt. $reason Thank you.")
             }
-            return listOf(
-                Flag("f1", "Gloves, masks & kits ×38", "₹3,420", t["n1"], t["why1"],
-                    "Hello, this is $n, family of Lakshmi (IP [NUMBER]). The final bill lists gloves, masks and kits 38 times for ₹3,420. Could you share the itemised list for these? Thank you."),
-                Flag("f2", "ECG, listed twice on 26 Sep", "₹900", t["n2"], t["why2"],
-                    "Hello, this is $n, family of Lakshmi (IP [NUMBER]). ECG appears twice on 26 Sep at ₹450 each. Could you confirm whether two ECGs were done that day? Thank you."),
-                Flag("f3", "Admission & admin charges", "₹1,500", t["n3"], t["why3"],
-                    "Hello, this is $n, family of Lakshmi (IP [NUMBER]). Could you explain what the ₹1,500 admission and admin charge covers? Thank you."),
-            )
         }
 
-    val billRows: List<Pair<String, String>>
-        get() {
-            if (hasCaseData) return billData?.items.orEmpty().map { it.description to rupees(it.amount) }
-            return listOf(
-                "Room · 5 days" to "₹42,500", "ICU · 1 day" to "₹22,000", "Doctor & specialist visits" to "₹18,000",
-                "Medicines & IV fluids" to "₹61,230", "Lab tests & scans" to "₹34,800",
-            )
-        }
+    val billRows: List<Pair<String, String>> get() = billData?.items.orEmpty().map { it.description to rupees(it.amount) }
+    val billTotalFormatted: String get() = rupees(billData?.total ?: 0.0)
 
-    val billTotalFormatted: String
-        get() = if (hasCaseData) rupees(billData?.total ?: 0.0) else "₹1,84,350"
+    /** "01-10-2026 to 06-10-2026": the stay the bill is for, from the discharge summary. */
+    val stayLabel: String
+        get() = listOf(dischargeCardData?.admissionDate.orEmpty(), dischargeCardData?.dischargeDate.orEmpty())
+            .filter { it.isNotBlank() }.joinToString(" – ")
+
+    /** Marks a billing question as approved and hands its text to the phone's share sheet. */
+    fun sendQuery(flag: Flag) {
+        sent[flag.id] = true
+        shareRequest = flag.draft
+    }
+
+    /** Text waiting to be shared (WhatsApp, email...). MainActivity opens the share sheet and clears it. */
+    var shareRequest by mutableStateOf<String?>(null)
 
     /** The hospital named on the discharge summary, for the bill header. */
     val hospitalName: String get() = dischargeCardData?.hospital.orEmpty()
@@ -820,62 +836,131 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
     val unsent get() = flags.count { sent[it.id] != true }
 
     // ---------- Claim ----------
-    /** Claim papers: which ones have been uploaded and read. Sample checklist only before any upload. */
+    /** Claim papers: which ones have been uploaded and read. */
     val checklist: List<CheckItem>
         get() {
             val t = tx
-            if (hasCaseData) {
-                return CLAIM_PAPERS.map { (type, label, _) ->
-                    val docs = caseDocuments.filter { it.docType == type }
-                    val sub = when {
-                        docs.any { it.status == "ready" } -> t["paperReady"].replace("{n}", docs.count { it.status == "ready" }.toString())
-                        docs.any { it.status == "processing" } -> t["paperReading"]
-                        docs.isNotEmpty() -> t["paperFailed"]
-                        else -> t["paperMissing"]
-                    }
-                    CheckItem(t[label], sub, docs.any { it.status == "ready" })
+            return CLAIM_PAPERS.map { (type, label, _) ->
+                val docs = caseDocuments.filter { it.docType == type }
+                val sub = when {
+                    docs.any { it.status == "ready" } -> t["paperReady"].replace("{n}", docs.count { it.status == "ready" }.toString())
+                    docs.any { it.status == "processing" } -> t["paperReading"]
+                    docs.isNotEmpty() -> t["paperFailed"]
+                    else -> t["paperMissing"]
                 }
+                CheckItem(t[label], sub, docs.any { it.status == "ready" })
             }
-            return listOf(
-                CheckItem(t["k1"], t["k1s"], true),
-                CheckItem(t["k2"], t["k2s"], true),
-                CheckItem(t["k3"], t["k3s"], true),
-                CheckItem(t["k4"], if (k4) t["k4a"] else t["k4b"], k4, t["rescan"]) { k4 = true },
-                CheckItem(t["k5"], if (k5) t["k5a"] else t["k5b"], k5, t["add"]) { k5 = true },
-                CheckItem(t["k6"], t["k6s"], true),
-            )
         }
-    val missing get() =
-        if (hasCaseData) CLAIM_PAPERS.indices.count { CLAIM_PAPERS[it].third && !checklist[it].done } else listOf(k4, k5).count { !it }
-    val curStep get() = if (approved) 3 else 2
-    val track: List<Pair<String, String>>
+    private val requiredPapers get() = CLAIM_PAPERS.count { it.third }
+    val missing get() = CLAIM_PAPERS.indices.count { CLAIM_PAPERS[it].third && !checklist[it].done }
+
+    /** The AI-drafted claim letter. Nothing is marked sent until a family member approves it. */
+    var claimDraft by mutableStateOf<ClaimDraftModel?>(null)
+    var draftBusy by mutableStateOf(false)
+    var draftError by mutableStateOf<String?>(null)
+    val approved get() = claimDraft?.status == "approved" || claimDraft?.status == "sent"
+
+    /** Where the claim is, from what has really happened: label, detail, done. */
+    val claimSteps: List<Triple<String, String, Boolean>>
         get() {
             val t = tx
+            val status = claimDraft?.status
             return listOf(
-                t["tr1"] to t["tr1s"], t["tr2"] to t["tr2s"],
-                t["tr3"] to (if (approved) t["tr3a"] else t["tr3b"]),
-                t["tr4"] to (if (approved) t["tr4a"] else t["tr4b"]),
-                t["tr5"] to t["tr5s"],
+                Triple(t["csPapers"], t["csPapersSub"].replace("{n}", (requiredPapers - missing).toString()).replace("{of}", requiredPapers.toString()), missing == 0),
+                Triple(t["csCoverage"], coverage?.let { t["csCoverageDone"].replace("{amt}", rupees(it.estimatedClaimable)) } ?: t["csCoverageWait"], coverage != null),
+                Triple(t["csLetter"], when (status) { null -> t["csLetterNone"]; "draft" -> t["csLetterDraft"]; else -> t["csLetterOk"] }, approved),
+                Triple(t["csSent"], if (status == "sent") t["csSentDone"] else t["csSentWait"], status == "sent"),
             )
         }
-    fun approveClaim() { if (missing == 0) { approved = true; sheet = null; ftab = FTab.Claim } }
+    val track: List<Pair<String, String>> get() = claimSteps.map { it.first to it.second }
+    val curStep get() = claimSteps.indexOfFirst { !it.third }.let { if (it < 0) claimSteps.size else it }
+
+    /** When the claim must reach the insurer, from the policy's deadline and the discharge date. */
+    val claimDeadline: Pair<String, String>?
+        get() {
+            val text = policy?.claimDeadline?.takeIf { it.isNotBlank() } ?: return null
+            val days = Regex("(\\d+)\\s*days").find(text)?.groupValues?.get(1)?.toIntOrNull()
+            val discharged = dischargeCardData?.dischargeDate?.let(::parseDocDate)
+            if (days == null || discharged == null) return tx["deadlineLbl"] to text
+            val due = discharged.plusDays(days.toLong())
+            val left = java.time.temporal.ChronoUnit.DAYS.between(LocalDate.now(), due)
+            val date = due.format(java.time.format.DateTimeFormatter.ofPattern("d MMM yyyy", java.util.Locale.ENGLISH))
+            return tx["submitByLive"].replace("{date}", date) to
+                (if (left >= 0) tx["daysLeftLive"].replace("{n}", left.toString()) else tx["deadlinePassed"])
+        }
+
+    /** Asks the AI to draft the claim letter from this case's papers. */
+    fun prepareClaimLetter() {
+        if (draftBusy) return
+        draftBusy = true; draftError = null
+        viewModelScope.launch {
+            try {
+                val id = syncLock.withLock { ensureSession() } ?: throw java.io.IOException(tx["noCaseYet"])
+                val json = Backend.prepareClaimDraft(id)
+                claimDraftJson = json.toString(); claimDraft = parseDraft(json)
+            } catch (e: Exception) {
+                Log.w("MedSure", "Claim letter failed", e)
+                draftError = e.message ?: "Could not reach the MedSure server"
+            } finally {
+                draftBusy = false
+            }
+        }
+    }
+
+    /** The family approves the letter; only then is it marked sent and handed to the share sheet. */
+    fun approveClaim() {
+        val draft = claimDraft ?: return
+        if (missing > 0 || draftBusy) return
+        draftBusy = true; draftError = null
+        viewModelScope.launch {
+            try {
+                val json = Backend.approveAndSendDraft(draft.id, alreadyApproved = draft.status == "approved")
+                claimDraftJson = json.toString(); claimDraft = parseDraft(json)
+                sheet = null; ftab = FTab.Claim
+                shareRequest = draft.body
+            } catch (e: Exception) {
+                Log.w("MedSure", "Claim approval failed", e)
+                draftError = e.message ?: "Could not reach the MedSure server"
+            } finally {
+                draftBusy = false
+            }
+        }
+    }
+
+    // ---------- Recovery ----------
+    /** Check-in results by day, newest last. */
+    val checkinDays = mutableStateListOf<CheckinDay>()
+
+    /** The last seven days ending today: weekday letter and that day's result (null: no check-in). */
+    val week: List<Pair<String, Int?>>
+        get() {
+            val today = LocalDate.now()
+            val mine = if (isPatient && ciDone) levelIndex else null // today's answer shows before it has synced
+            return (6 downTo 0).map { back ->
+                val day = today.minusDays(back.toLong())
+                val level = checkinDays.lastOrNull { it.day == day }?.level ?: mine.takeIf { back == 0 }
+                day.dayOfWeek.getDisplayName(java.time.format.TextStyle.SHORT, java.util.Locale.ENGLISH) to level
+            }
+        }
+
+    /** Amber and red check-ins from the last seven days, newest first. */
+    val flaggedDays: List<CheckinDay> get() = checkinDays.filter { it.level > 0 && it.day >= LocalDate.now().minusDays(6) }.reversed()
 
     // ---------- Family home ----------
     val approvals: List<Approval>
         get() {
             val t = tx
             val list = mutableListOf<Approval>()
-            if (showingSample && medChange != "approved") list += Approval(t["apMed"], t["apMedSub"]) { ftab = FTab.Meds }
-            if (!approved) list += Approval(t["apClaim"], if (missing > 0) "$missing ${t["apMissing"]}" else t["apAllIn"]) { sheet = Sheet.Approve }
+            if (hasCaseData && !approved) list += Approval(t["apClaimLive"], if (missing > 0) "$missing ${t["apMissing"]}" else t["apAllIn"]) { ftab = FTab.Claim }
             if (unsent > 0) list += Approval("$unsent ${t["apBills"]}", t["apBillsSub"]) { ftab = FTab.Bills }
             return list
         }
     val famHead: String
         get() = when {
-            !ciDone -> tx["fh0"]
-            levelIndex == 0 -> tx["fh1"]
-            levelIndex == 1 -> tx["fh2"]
-            else -> tx["fh3"]
+            !ciDone -> named("fh0n")
+            levelIndex == 0 -> named("fh1n")
+            levelIndex == 1 -> named("fh2n")
+            else -> named("fh3n")
         }
 
     // ---------- Persistence ----------
@@ -894,13 +979,11 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
     private fun snapshot(): JSONObject = JSONObject()
         .put("v", STATE_VERSION).put("day", today())
         .put("sessionStale", sessionStale).put("pendingCheckin", pendingCheckin).put("stateDirty", stateDirty).put("sentNote", sentNote)
-        .put("stage", when (stage) {
-            Stage.App -> "App"
-            Stage.Onboarding -> "Onboarding"
-            Stage.Processing -> "Processing" // resumes reading the papers; uploads already done are not repeated
-            Stage.Lang -> "Lang"
-            else -> "Welcome"
-        })
+        // Every stage is saved as it is. Processing resumes reading the papers; uploads are not repeated.
+        // The one-time codes on the Otp screen are never saved, so that screen comes back empty.
+        .put("stage", stage.name).put("loginRole", loginRole.name)
+        .put("overlay", overlay?.name).put("prevOverlay", prevOverlay?.name).put("sheet", sheet?.name).put("qid", qid)
+        .put("fName", fName).put("fRel", fRel).put("fRole", fRole).put("fPhone", fPhone).put("fEmail", fEmail)
         .put("lang", lang).put("role", role.name).put("phone", phone).put("email", email)
         .put("ptab", ptab.name).put("ftab", ftab.name)
         .put("members", JSONArray(members.map {
@@ -909,7 +992,7 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
         .put("taken", JSONObject(taken.toMap())).put("step", step).put("ans", JSONArray(ans.toList()))
         .put("note", note).put("noteSaved", noteSaved).put("lastCheckinId", lastCheckinId)
         .put("care", care).put("filter", filter).put("chosen", chosen).put("share", share)
-        .put("sent", JSONObject(sent.toMap())).put("k4", k4).put("k5", k5).put("approved", approved)
+        .put("sent", JSONObject(sent.toMap())).put("k4", k4).put("k5", k5)
         .put("medChange", medChange).put("plan", plan).put("plus", plus)
         .put("onboardingStep", onboardingStep).put("onbFullName", onbFullName).put("onbAge", onbAge)
         .put("onbGender", onbGender).put("onbBloodGroup", onbBloodGroup)
@@ -922,6 +1005,8 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
         .put("uploadedDocs", JSONObject(uploadedDocs.toMap())).put("patientName", patientName)
         // What the backend read from the documents, exactly as it sent it.
         .put("cardJson", cardJson).put("billJson", billJson).put("coverageJson", coverageJson).put("documentsJson", documentsJson)
+        .put("policyJson", policyJson).put("claimDraftJson", claimDraftJson)
+        .put("checkinDays", JSONArray(checkinDays.map { JSONObject().put("day", it.day.toString()).put("level", it.level).put("note", it.note) }))
 
     /** Writes the current state to the phone. Also runs by itself shortly after anything changes. */
     fun save() {
@@ -933,7 +1018,7 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
         if (o.optInt("v") != STATE_VERSION) return // saved by an older build: start clean
         lang = o.str("lang")
         role = if (o.optString("role") == Role.Family.name) Role.Family else Role.Patient
-        loginRole = role
+        loginRole = if (o.optString("loginRole", role.name) == Role.Family.name) Role.Family else Role.Patient
         phone = o.optString("phone"); email = o.optString("email")
         ptab = PTab.entries.firstOrNull { it.name == o.optString("ptab") } ?: PTab.Today
         ftab = FTab.entries.firstOrNull { it.name == o.optString("ftab") } ?: FTab.Home
@@ -943,7 +1028,7 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
         }
         care = o.optString("care", care); filter = o.optString("filter", filter); chosen = o.str("chosen"); share = o.optBoolean("share", share)
         o.optJSONObject("sent")?.let { m -> sent.clear(); m.keys().forEach { sent[it] = m.getBoolean(it) } }
-        k4 = o.optBoolean("k4"); k5 = o.optBoolean("k5"); approved = o.optBoolean("approved")
+        k4 = o.optBoolean("k4"); k5 = o.optBoolean("k5")
         medChange = o.optString("medChange", medChange); plan = o.optString("plan", plan); plus = o.optBoolean("plus")
         onboardingStep = o.optInt("onboardingStep", 1).coerceIn(1, 4)
         onbFullName = o.optString("onbFullName"); onbAge = o.optString("onbAge")
@@ -964,6 +1049,16 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
         billJson = o.str("billJson")?.also { runCatching { billData = parseBill(JSONObject(it)).takeIf { b -> b.items.isNotEmpty() } } }
         coverageJson = o.str("coverageJson")?.also { runCatching { coverage = parseCoverage(JSONObject(it)) } }
         documentsJson = o.str("documentsJson")?.also { runCatching { setDocuments(parseDocuments(JSONArray(it))) } }
+        policyJson = o.str("policyJson")?.also { runCatching { policy = parsePolicy(JSONObject(it)) } }
+        claimDraftJson = o.str("claimDraftJson")?.also { runCatching { claimDraft = parseDraft(JSONObject(it)) } }
+        o.optJSONArray("checkinDays")?.let { arr ->
+            runCatching {
+                checkinDays.clear()
+                checkinDays.addAll(arr.mapObjects { CheckinDay(LocalDate.parse(it.getString("day")), it.getInt("level"), it.optString("note")) })
+            }
+        }
+        fName = o.optString("fName"); fRel = o.optString("fRel", fRel); fRole = o.optString("fRole", fRole)
+        fPhone = o.optString("fPhone"); fEmail = o.optString("fEmail"); qid = o.optString("qid", qid)
         sessionStale = o.optBoolean("sessionStale", true); stateDirty = o.optBoolean("stateDirty")
 
         // Tablets taken and the check-in belong to one day; a new day starts fresh.
@@ -974,12 +1069,13 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
             note = o.optString("note"); noteSaved = o.optString("noteSaved"); lastCheckinId = o.int("lastCheckinId")
             pendingCheckin = o.optBoolean("pendingCheckin"); sentNote = o.optString("sentNote")
         }
-        stage = when (o.optString("stage")) {
-            "App" -> Stage.App
-            "Onboarding" -> Stage.Onboarding
-            "Processing" -> Stage.Processing
-            "Lang" -> Stage.Lang
-            else -> if (lang != null) Stage.Welcome else Stage.Lang
+        // "Onboarding" used to stand for the Processing stage too; both names still restore correctly.
+        stage = Stage.entries.firstOrNull { it.name == o.optString("stage") } ?: if (lang != null) Stage.Welcome else Stage.Lang
+        if (stage == Stage.App) {
+            // The open screen on top of the tabs: Settings, Add family member, language picker, or a bottom sheet.
+            overlay = Overlay.entries.firstOrNull { it.name == o.str("overlay") }
+            prevOverlay = Overlay.entries.firstOrNull { it.name == o.str("prevOverlay") }
+            sheet = Sheet.entries.firstOrNull { it.name == o.str("sheet") }.takeIf { !isPatient }
         }
     }
 

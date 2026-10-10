@@ -10,8 +10,9 @@ Rules:
 - Use only the facts provided. Never invent policy numbers, claim numbers, dates, amounts or medical details.
 - Where a needed fact is missing, write a placeholder in square brackets, for example [Policy number].
 - Do not state how the writer is related to the patient; use [Relationship to patient].
-- Do not say what the policy covers or that a charge is payable. You have not seen the policy.
-  Ask the insurer to point to the clause it relied on instead.
+- Do not say what the policy covers or that a charge is payable; that is the insurer's decision.
+  In an appeal, ask the insurer to point to the clause it relied on.
+- Give the policy number, hospital and admission / discharge dates when they are in the facts.
 - Do not describe what the insurer did beyond what the notes say.
 - Polite, firm and factual. No threats and no legal assertions. Under 300 words.
 - Plain text only: no markdown, no asterisks, no bullet symbols other than "-" or numbers.

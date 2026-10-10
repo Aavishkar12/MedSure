@@ -122,6 +122,12 @@ fun NearbyCareScreen(vm: MedSureViewModel) {
             filters.forEach { (id, label) -> Chip(label, vm.filter == id) { vm.filter = id } }
         }
         if (searching) T("Finding care near you…", 14, 400, Ms.Muted)
+        if (!searching && vm.places.isEmpty()) {
+            EmptyNote(if (placesClient == null) t["noPlacesKey"] else t["noPlaces"])
+            MsButton(t["findHosp"], BtnKind.Mari, Modifier.fillMaxWidth(), height = 44.dp) {
+                openDirections(context, Place("", "hosp", "hospital near me", "", "", "", ""))
+            }
+        }
 
         vm.places.forEach { p ->
             MsCard(border = if (vm.chosen == p.id) Ms.Ink else Ms.Line, gap = 12.dp) {
@@ -130,7 +136,7 @@ fun NearbyCareScreen(vm: MedSureViewModel) {
                         T(p.name, 17, 700)
                         T(p.meta, 14, 400, Ms.Muted)
                     }
-                    D(p.dist, 20)
+                    if (p.dist.isNotEmpty()) D(p.dist, 20)
                 }
                 if (p.open.isNotEmpty() || p.badge.isNotEmpty()) Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     if (p.open.isNotEmpty()) T(p.open, 13, 700, Ms.GreenFg, Modifier.clip(RoundedCornerShape(999.dp)).background(Ms.GreenBg).padding(horizontal = 10.dp, vertical = 4.dp))
@@ -154,9 +160,8 @@ private fun openDirections(context: Context, p: Place) {
     val uri = if (known) {
         Uri.parse("https://www.google.com/maps/dir/?api=1&destination=${p.lat},${p.lng}")
     } else {
-        // No coordinates (sample entry or no Maps key): search for the kind of place near the phone instead.
-        val what = when (p.type) { "pharm" -> "pharmacy"; "clinic" -> "clinic"; else -> "hospital" }
-        Uri.parse("https://www.google.com/maps/search/?api=1&query=" + Uri.encode("$what near me"))
+        // The hospital from the discharge papers has a name but no coordinates: let Maps find it.
+        Uri.parse("https://www.google.com/maps/search/?api=1&query=" + Uri.encode(p.name))
     }
     val intent = Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
     try {

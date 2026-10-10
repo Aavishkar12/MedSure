@@ -177,3 +177,36 @@ def test_bill_and_policy_upload_produce_coverage(client: TestClient, session: Se
 
 def test_run_coverage_needs_bill_and_policy(client: TestClient, case_id: int):
     assert client.post(f"/cases/{case_id}/coverage").status_code == 409
+
+
+def test_claim_letter_is_drafted_from_the_case_and_needs_approval(client: TestClient, session: Session, case_id: int):
+    from app.models import Document, PolicySummary
+
+    doc = Document(case_id=case_id, doc_type="policy", filename="policy.pdf", path="", sha256="p1", status="ready")
+    session.add(doc)
+    session.commit()
+    session.add(PolicySummary(case_id=case_id, document_id=doc.id, data=POLICY))
+    session.commit()
+
+    assert client.get(f"/cases/{case_id}/claim-draft").status_code == 404
+    seen = {}
+
+    def letter(**kwargs):
+        seen["facts"] = kwargs["messages"][1]["content"]
+        return "To the Claims Manager, Star Health\n\nPlease process the claim."
+
+    with patch("app.llm.client._chat", side_effect=letter), patch.object(settings, "groq_api_key", "test-key"):
+        draft = client.post(f"/cases/{case_id}/claim-draft", json={"kind": "claim_letter"}).json()
+    assert draft["status"] == "draft"
+    # The letter is written from this case's own policy and papers.
+    assert "MHA/FF/2026/0048213" in seen["facts"] and "Star Health" in seen["facts"]
+    assert "Policy copy / e-card" in seen["facts"]
+
+    assert client.get(f"/cases/{case_id}/claim-draft").json()["id"] == draft["id"]
+    assert client.post(f"/drafts/{draft['id']}/send").status_code == 409  # never before a family member approves
+    assert client.post(f"/drafts/{draft['id']}/approve").json()["status"] == "approved"
+    assert client.post(f"/drafts/{draft['id']}/send").json()["status"] == "sent"
+
+
+def test_claim_letter_needs_the_ai(client: TestClient, case_id: int):
+    assert client.post(f"/cases/{case_id}/claim-draft", json={"kind": "claim_letter"}).status_code == 503

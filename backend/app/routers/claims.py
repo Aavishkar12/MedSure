@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -8,7 +8,10 @@ from .. import llm
 from ..config import settings
 from ..db import get_session
 from ..deps import add_event, current_user, require_member
-from ..models import BillItem, Case, CaseMember, ChecklistItem, Claim, DischargeCard, Document, Draft, User, now
+from ..models import (
+    BillItem, Case, CaseMember, ChecklistItem, Claim, DischargeCard, Document, Draft,
+    PolicySummary, User, now,
+)
 from ..notify import notify_case
 
 router = APIRouter(tags=["claims"])
@@ -119,11 +122,21 @@ def _letter_facts(session: Session, claim: Claim, notes: str) -> dict:
     ).first()
     bill_total = sum(session.exec(select(BillItem.amount).where(BillItem.case_id == claim.case_id)).all())
     checklist = _claim_out(session, claim).checklist
+    policy = session.exec(
+        select(PolicySummary).where(PolicySummary.case_id == claim.case_id).order_by(PolicySummary.id.desc())
+    ).first()
+    terms = policy.data if policy else {}
+    stay = card.data if card else {}
     return {
         "patient_name": case.patient_name,
-        "insurer": claim.insurer or None,
+        "insurer": claim.insurer or terms.get("insurer"),
+        "policy_number": terms.get("policy_number"),
+        "policyholder": terms.get("policyholder_name"),
         "claim_type": claim.mode,
         "claim_status": claim.status,
+        "hospital": stay.get("hospital"),
+        "admission_date": stay.get("admission_date"),
+        "discharge_date": stay.get("discharge_date"),
         "diagnosis": card.data.get("diagnosis", {}).get("name") if card else None,
         "bill_total": f"Rs {bill_total:,.2f}" if bill_total else None,
         "documents_enclosed": [c.label for c in checklist if c.present],
@@ -159,6 +172,68 @@ def create_draft(
         exclude_user_id=user.id,
     )
     return draft
+
+
+def _make_draft(session: Session, claim: Claim, kind: str, notes: str, user: User) -> Draft:
+    if settings.groq_api_key.strip():
+        try:
+            text = llm.draft_letter(kind, _letter_facts(session, claim, notes))
+        except llm.LLMError as e:
+            raise HTTPException(503, str(e))
+    else:
+        raise HTTPException(503, "AI drafting is not configured on the server (GROQ_API_KEY).")
+    draft = Draft(case_id=claim.case_id, claim_id=claim.id, kind=kind, body=text)
+    session.add(draft)
+    session.flush()
+    add_event(session, claim.case_id, "draft", f"Draft {kind.replace('_', ' ')} ready for review", draft.id)
+    session.commit()
+    session.refresh(draft)
+    notify_case(
+        session, claim.case_id, "MedSure", "A draft letter is waiting for review.", "draft", draft.id,
+        exclude_user_id=user.id,
+    )
+    return draft
+
+
+def _latest_claim_draft(session: Session, case_id: int) -> Optional[Draft]:
+    return session.exec(
+        select(Draft).where(Draft.case_id == case_id, Draft.kind == "claim_letter").order_by(Draft.id.desc())
+    ).first()
+
+
+@router.get("/cases/{case_id}/claim-draft", response_model=Draft)
+def get_claim_draft(case_id: int, user: User = Depends(current_user), session: Session = Depends(get_session)):
+    """The newest claim letter for the case, whatever its state (draft, approved or sent)."""
+    require_member(session, case_id, user)
+    draft = _latest_claim_draft(session, case_id)
+    if not draft:
+        raise HTTPException(404, "No claim letter has been drafted yet")
+    return draft
+
+
+@router.post("/cases/{case_id}/claim-draft", response_model=Draft, status_code=201)
+def prepare_claim_draft(
+    case_id: int, body: DraftCreate, user: User = Depends(current_user), session: Session = Depends(get_session)
+):
+    """
+    Drafts the claim letter from the case's own documents, starting the claim if there is none yet.
+    It is only ever a draft: a family member who can approve must approve it before it can be sent.
+    """
+    require_member(session, case_id, user)
+    claim = session.exec(select(Claim).where(Claim.case_id == case_id).order_by(Claim.id.desc())).first()
+    if not claim:
+        policy = session.exec(
+            select(PolicySummary).where(PolicySummary.case_id == case_id).order_by(PolicySummary.id.desc())
+        ).first()
+        claim = Claim(case_id=case_id, mode="reimbursement", insurer=(policy.data.get("insurer") or "") if policy else "")
+        session.add(claim)
+        session.flush()
+        for label, doc_type in DEFAULT_CHECKLIST:
+            session.add(ChecklistItem(claim_id=claim.id, label=label, doc_type=doc_type))
+        add_event(session, case_id, "claim", "Reimbursement claim started", claim.id)
+        session.commit()
+        session.refresh(claim)
+    return _make_draft(session, claim, body.kind, body.notes, user)
 
 
 @router.get("/drafts/{draft_id}", response_model=Draft)
