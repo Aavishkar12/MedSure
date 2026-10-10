@@ -79,6 +79,9 @@ private val KNOWN_RELATIONS = setOf("son", "daughter", "spouse", "other")
 /** Papers an insurance claim needs: upload category, label key, and whether the claim cannot go without it. */
 private const val LAST_UTTERANCE = "last"
 
+/** Id of the Help-tab entry for the hospital named on the discharge papers. */
+const val DISCHARGE_HOSPITAL_ID = "discharge-hospital"
+
 private val CLAIM_PAPERS = listOf(
     Triple("discharge_summary", "cpDischarge", true),
     Triple("bill", "cpBill", true),
@@ -102,8 +105,6 @@ data class Level(
 
 data class Place(
     val id: String, val type: String, val name: String, val meta: String, val dist: String, val open: String, val badge: String, val lat: Double = 0.0, val lng: Double = 0.0,
-    /** Straight-line distance from the phone's live location, for sorting. */
-    val meters: Float = 0f,
 )
 
 data class Flag(
@@ -870,11 +871,16 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---------- Help ----------
     var rawPlaces = mutableStateListOf<Place>()
-    /**
-     * Care found around the phone's live location, nearest first, narrowed by the chosen filter chip.
-     * The hospital on the discharge papers is in the list at its real distance, marked, not on top.
-     */
-    val places: List<Place> get() = rawPlaces.filter { filter == "all" || it.type == filter }
+    /** Places found near the phone, with the hospital that discharged the patient listed first. */
+    val places: List<Place>
+        get() {
+            val list = rawPlaces.toMutableList()
+            val own = hospitalName
+            if (own.isNotBlank() && list.none { it.name.equals(own, ignoreCase = true) }) {
+                list.add(0, Place(DISCHARGE_HOSPITAL_ID, "hosp", own, tx["yourHospital"], "", "", tx["knows"]))
+            }
+            return list.filter { filter == "all" || it.type == filter }
+        }
 
     // ---------- Bills ----------
     /** Bill lines the AI marked as worth asking the billing desk about, each with a ready-to-send question. */
