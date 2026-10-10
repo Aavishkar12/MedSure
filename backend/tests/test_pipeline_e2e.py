@@ -4,7 +4,6 @@ from pathlib import Path
 # pyrefly: ignore [missing-import]
 import pytest
 from fastapi.testclient import TestClient
-from PIL import Image
 
 from app.main import app
 from app.db import init_db
@@ -162,17 +161,16 @@ def test_sha256_hash_caching():
     assert ext2["fields"]["bill_no"] == "PH-9988"
 
 
-def test_ocr_path_with_image():
+def test_image_without_phone_text_is_not_read_on_the_server():
     client = TestClient(app)
     headers = {"x-user-id": "test-user-ocr"}
 
     case_id = client.post("/cases", json={"patient_name": "OCR Patient"}, headers=headers).json()["id"]
 
-    # Generate an image with Pillow
-    img = Image.new("RGB", (300, 100), color="white")
-    buf = io.BytesIO()
-    img.save(buf, format="JPEG")
-    img_bytes = buf.getvalue()
+    # A picture with nothing the phone could read: it arrives without any text.
+    import pymupdf
+
+    img_bytes = pymupdf.open().new_page(width=300, height=100).get_pixmap().tobytes("jpeg")
 
     upload_res = client.post(
         f"/cases/{case_id}/documents",
@@ -183,7 +181,7 @@ def test_ocr_path_with_image():
     job_id = upload_res.json()["job_id"]
     doc_id = upload_res.json()["documents"][0]["id"]
 
-    # A blank picture has nothing to read: the job finishes and reports the document as failed.
+    # The server does not read pictures: the job finishes and reports the document as failed.
     job_status = client.get(f"/jobs/{job_id}", headers=headers).json()
     assert job_status["stage"] == "failed"
     doc = client.get(f"/documents/{doc_id}", headers=headers).json()
@@ -191,7 +189,7 @@ def test_ocr_path_with_image():
 
     # Verify extraction record
     ext = client.get(f"/cases/{case_id}/extractions/{doc_id}", headers=headers).json()
-    assert ext["extraction_method"] == "ocr"
+    assert ext["extraction_method"] == "unknown"  # the server has no OCR of its own
     # Should not crash; unknown doc type if blank image
     assert ext["doc_type"] == "unknown"
 

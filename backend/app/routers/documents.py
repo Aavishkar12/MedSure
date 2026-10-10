@@ -1,7 +1,7 @@
 """Document upload and reading.
 
 Every document goes through the same steps:
-  file -> text (PDF text layer, OCR from the phone, or Tesseract) -> what kind of document it is
+  file -> text (PDF text layer, or text read on the phone) -> saved in the database -> what kind of document it is
        -> structured data (the LLM when GROQ_API_KEY is set; the rule-based parsers otherwise)
 Nothing here returns sample data: what the app shows comes from the document that was uploaded.
 """
@@ -33,6 +33,7 @@ from ..models import (
     User,
 )
 from ..notify import notify_case
+from ..pipeline.extractor import NEEDS_PHONE_TEXT
 from ..pipeline.runner import run_pipeline_for_document
 from ..pipeline.schemas import CaseExtractionEnvelope, DocumentExtractionEnvelope
 from .coverage import refresh_coverage
@@ -104,28 +105,9 @@ def _case_extraction(session: Session, case_id: int) -> CaseExtractionEnvelope:
     )
 
 
-def _llm_inputs(doc: Document, text: str, method: str) -> tuple[str, list[bytes]]:
-    """
-    Clean text alone when the document has a text layer. For scans and photos, the page images with
-    whatever OCR text there is (from the phone or Tesseract) as a hint.
-    The vision model only sees the first few pages, so a longer scan that already has OCR text for
-    every page is read from that text instead: no page is silently dropped.
-    """
-    if text and method == "text_layer":
-        return text, []
-    images = llm.file_to_images(doc.path) if doc.path and Path(doc.path).suffix.lower() != ".txt" else []
-    if text and method == "device_ocr" and text.count("[Page ") > len(images):
-        return text, []
-    if images:
-        return text, images
-    if text:
-        return text, []
-    raise ValueError("Could not find any readable text or pages in this document")
-
-
-def _card_from_llm(doc_type: str, text: str, images: list[bytes]) -> dict:
+def _card_from_llm(doc_type: str, text: str) -> dict:
     if doc_type == "prescription":
-        rx = llm.extract_prescription(text, images)
+        rx = llm.extract_prescription(text)
         return {
             "kind": "prescription",
             "summary": "",
@@ -149,7 +131,7 @@ def _card_from_llm(doc_type: str, text: str, images: list[bytes]) -> dict:
             "disclaimer": rx["disclaimer"],
         }
     if doc_type == "lab_report":
-        lab = llm.extract_lab_report(text, images)
+        lab = llm.extract_lab_report(text)
         return {
             "kind": "lab_report",
             "summary": lab.get("summary") or "",
@@ -174,7 +156,7 @@ def _card_from_llm(doc_type: str, text: str, images: list[bytes]) -> dict:
             "raw_lab": lab,
             "disclaimer": lab["disclaimer"],
         }
-    return {"kind": "discharge_summary", **llm.extract_discharge_card(text, images)}
+    return {"kind": "discharge_summary", **llm.extract_discharge_card(text)}
 
 
 def _card_from_rules(fields: dict, envelope_type: str) -> dict:
@@ -263,7 +245,13 @@ def _with_quantity(description: str, quantity, unit_price) -> str:
 
 
 def _read(session: Session, doc: Document, text: str, method: str, envelope) -> None:
-    """Turns the document's text into its structured rows: Discharge Card, bill lines or policy terms."""
+    """Turns the document's text into its structured rows: Discharge Card, bill lines or policy terms.
+
+    The text comes from the database (the PDF's text layer, or what the phone read on the device).
+    Only that text goes to the AI; page images never leave this server.
+    """
+    if not text.strip() and doc.doc_type != "id_proof":
+        raise ValueError(NEEDS_PHONE_TEXT)
     ai = bool(settings.groq_api_key.strip())
     # Demo sample data (DEMO_FALLBACK) is for inspecting the pipeline only; it never becomes a patient's card.
     fields = envelope.fields if envelope.extraction_method != "demo_fallback" else {}
@@ -271,7 +259,7 @@ def _read(session: Session, doc: Document, text: str, method: str, envelope) -> 
         if prev := _previous(session, doc, DischargeCard):
             data = prev[0].data
         elif ai:
-            data = _card_from_llm(doc.doc_type, *_llm_inputs(doc, text, method))
+            data = _card_from_llm(doc.doc_type, text)
         else:
             data = _card_from_rules(fields, envelope.doc_type)
         card = DischargeCard(case_id=doc.case_id, document_id=doc.id, data=data)
@@ -284,7 +272,7 @@ def _read(session: Session, doc: Document, text: str, method: str, envelope) -> 
         if prev := _previous(session, doc, BillItem):
             items = [i.model_dump(include=set(BILL_COLUMNS)) for i in prev]
         elif ai:
-            items = llm.extract_bill(*_llm_inputs(doc, text, method))
+            items = llm.extract_bill(text)
             for item in items:
                 item["description"] = _with_quantity(item["description"], item.get("quantity"), item.get("unit_price"))
         else:
@@ -303,7 +291,7 @@ def _read(session: Session, doc: Document, text: str, method: str, envelope) -> 
         if prev := _previous(session, doc, PolicySummary):
             data = prev[0].data
         elif ai:
-            data = llm.extract_policy(*_llm_inputs(doc, text, method))
+            data = llm.extract_policy(text)
         else:
             data = _policy_from_rules(fields)
         session.add(PolicySummary(case_id=doc.case_id, document_id=doc.id, data=data))
@@ -462,7 +450,7 @@ async def upload_documents(
     files: List[UploadFile] = File(default=[]),
     file: Optional[UploadFile] = File(None),
     doc_type: Optional[str] = Form(None, description=f"One of {DOC_TYPES}; detected from the text when left out"),
-    ocr_text: Optional[str] = Form(None, description="On-device OCR text. Mark pages as [Page 1], [Page 2]..."),
+    ocr_text: Optional[str] = Form(None, description="Text the phone read from the pages on the device (ML Kit). Mark pages as [Page 1], [Page 2]..."),
     user: User = Depends(current_user),
     session: Session = Depends(get_session),
 ):
@@ -648,7 +636,7 @@ def policy(case_id: int, user: User = Depends(current_user), session: Session = 
 # ---------- Questions ----------
 
 def _qa_text(session: Session, doc: Document) -> str:
-    """The document's own text, or its extracted data when it was read from images."""
+    """The document's own text, or its extracted data when no text was kept."""
     if doc.text and doc.text.strip():
         return doc.text
     cards = session.exec(select(DischargeCard).where(DischargeCard.document_id == doc.id)).all()

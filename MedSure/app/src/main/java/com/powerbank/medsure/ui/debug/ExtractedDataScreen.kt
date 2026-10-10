@@ -25,7 +25,7 @@ import org.json.JSONObject
  * Optional debug-only screen / dialog to inspect real pipeline extractions:
  * - Document type
  * - Key extracted fields
- * - Extraction method (text_layer vs ocr vs demo_fallback)
+ * - Extraction method (text_layer vs device_ocr, read on the phone, vs demo_fallback)
  * - Classification and extraction confidence
  * - Validation warnings
  * - Formatted structured JSON inspection
@@ -133,10 +133,10 @@ private fun DocumentExtractionCard(doc: JSONObject) {
             // Method badge
             Box(
                 Modifier.clip(RoundedCornerShape(999.dp))
-                    .background(if (method == "ocr") Ms.AmberBg else Ms.GreenBg)
+                    .background(if (method == "device_ocr") Ms.AmberBg else Ms.GreenBg)
                     .padding(horizontal = 8.dp, vertical = 4.dp)
             ) {
-                T(method.uppercase(), 11, 800, if (method == "ocr") Ms.AmberFg else Ms.GreenFg)
+                T(method.uppercase(), 11, 800, if (method == "device_ocr") Ms.AmberFg else Ms.GreenFg)
             }
         }
 

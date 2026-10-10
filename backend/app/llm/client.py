@@ -1,6 +1,5 @@
 """Thin Groq wrapper. Everything provider-specific lives in this file."""
 
-import base64
 import json
 import logging
 import time
@@ -11,9 +10,6 @@ from groq import APIConnectionError, APIError, AuthenticationError, Groq, RateLi
 from ..config import settings
 
 logger = logging.getLogger("medsure.llm")
-
-# Groq caps images per request; keep discharge packs short or split by page.
-MAX_IMAGES = 5
 
 _client: Groq | None = None
 
@@ -43,36 +39,8 @@ def file_to_text(path: str) -> str:
         return ""
 
 
-def file_to_images(path: str) -> list[bytes]:
-    """Return JPEG bytes per page. PDFs are rendered; images pass through."""
-    p = Path(path)
-    if not p.exists():
-        return []
-    if p.suffix.lower() != ".pdf":
-        try:
-            return [p.read_bytes()]
-        except Exception as e:
-            logger.warning(f"Failed to read image bytes from {path}: {e}")
-            return []
-    try:
-        import pymupdf
-
-        with pymupdf.open(p) as pdf:
-            return [page.get_pixmap(dpi=110).tobytes("jpeg") for page in pdf][:MAX_IMAGES]
-    except Exception as e:
-        logger.warning(f"Failed to render PDF to images from {path}: {e}")
-        return []
-
-
-def _messages(system: str, user: str, images: list[bytes] | None) -> list[dict]:
-    if not images:  # text-only models reject list content
-        return [{"role": "system", "content": system}, {"role": "user", "content": user}]
-    content: list[dict] = [{"type": "text", "text": user}]
-    for i, img in enumerate(images, start=1):
-        content.append({"type": "text", "text": f"[Page {i}]"})
-        url = "data:image/jpeg;base64," + base64.b64encode(img).decode()
-        content.append({"type": "image_url", "image_url": {"url": url}})
-    return [{"role": "system", "content": system}, {"role": "user", "content": content}]
+def _messages(system: str, user: str) -> list[dict]:
+    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
 
 class LLMError(RuntimeError):
@@ -145,12 +113,11 @@ def _chat_once(**kwargs) -> str:
         raise LLMError("An unexpected error occurred while communicating with the AI service.") from e
 
 
-def complete_json(system: str, user: str, images: list[bytes] | None = None) -> dict:
-    """One call that returns a JSON object. The system prompt must describe the schema."""
-    model = settings.groq_vision_model if images else settings.groq_text_model
+def complete_json(system: str, user: str) -> dict:
+    """One call that returns a JSON object. The system prompt must describe the schema. Text only: no images are ever sent."""
     raw = _chat(
-        model=model,
-        messages=_messages(system, user, images),
+        model=settings.groq_text_model,
+        messages=_messages(system, user),
         response_format={"type": "json_object"},
         temperature=0,
     )
@@ -163,4 +130,4 @@ def complete_json(system: str, user: str, images: list[bytes] | None = None) -> 
 
 
 def complete_text(system: str, user: str) -> str:
-    return _chat(model=settings.groq_text_model, messages=_messages(system, user, None), temperature=0.2)
+    return _chat(model=settings.groq_text_model, messages=_messages(system, user), temperature=0.2)
