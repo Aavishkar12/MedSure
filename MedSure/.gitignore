@@ -7,3 +7,4 @@ local.properties
 captures/
 # Firebase config: share privately, the repo is public
 app/google-services.json
+.kotlin/

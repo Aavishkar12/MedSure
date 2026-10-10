@@ -42,6 +42,8 @@ data class UploadedDoc(
     val name: String,
     val sizeBytes: Long,
     val mimeType: String,
+    /** Text read from a camera scan on the phone, with [Page N] markers. Sent to the backend with the file. */
+    val ocrText: String? = null,
 ) {
     val formattedSize: String get() {
         val kb = sizeBytes / 1024.0
@@ -75,6 +77,8 @@ const val NEXT_CALL_COUNTDOWN_SECONDS = 3
 private val KNOWN_RELATIONS = setOf("son", "daughter", "spouse", "other")
 
 /** Papers an insurance claim needs: upload category, label key, and whether the claim cannot go without it. */
+private const val LAST_UTTERANCE = "last"
+
 /** Id of the Help-tab entry for the hospital named on the discharge papers. */
 const val DISCHARGE_HOSPITAL_ID = "discharge-hospital"
 
@@ -147,6 +151,8 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
     var listening by mutableStateOf(false)
     var care by mutableStateOf("watch")
     var reading by mutableStateOf(false)
+        private set
+    var readError by mutableStateOf<String?>(null)
     var note by mutableStateOf("")
     var noteSaved by mutableStateOf("")
     var filter by mutableStateOf("all")
@@ -634,6 +640,82 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
     /** Dictionary text with the patient's name filled in. */
     fun named(key: String) = tx[key].replace("{name}", patientFirstName)
 
+    // ---------- Read aloud ----------
+    private var tts: android.speech.tts.TextToSpeech? = null
+    private var ttsReady = false
+
+    /** What the open My care section says, as one text to speak. */
+    private fun careSpeech(): String {
+        val t = tx
+        val card = dischargeCardData ?: return t["noCard"]
+        fun sentence(s: String) = s.trim().let { if (it.isEmpty() || it.last() in ".!?") it else "$it." }
+        val parts = when (care) {
+            "watch" -> listOf(t["cWatch"]) + card.warningSigns.map { it.text }.ifEmpty { listOf(t["noWatch"]) } +
+                t["call108line"] + (if (card.precautions.isEmpty()) emptyList() else listOf(t["precautions"]) + card.precautions.map { it.text })
+            "meds" -> listOf(t["cMeds"]) + card.medicines.map { m ->
+                listOf(listOf(m.name, m.dose).filter { it.isNotBlank() }.joinToString(" "), m.schedule,
+                    m.days?.let { "for $it days" }.orEmpty(), m.purpose).filter { it.isNotBlank() }.joinToString(", ")
+            }.ifEmpty { listOf(t["noMeds"]) }
+            "visit" -> listOf(t["cVisit"]) + card.followUps.map { listOf(it.text, it.sub).filter { s -> s.isNotBlank() }.joinToString(", ") }
+                .ifEmpty { listOf(t["noVisit"]) }
+            else -> listOf(t["cHappened"], card.diagnosisName, card.diagnosisPlain, card.summary)
+        }
+        return (parts.filter { it.isNotBlank() }.map(::sentence) + sentence(card.disclaimer)).joinToString(" ")
+    }
+
+    /** The "Read this aloud" button: speaks the open My care section, or stops if it is speaking. */
+    fun toggleReadAloud() {
+        if (reading) { stopReading(); return }
+        readError = null
+        val text = careSpeech()
+        val engine = tts
+        if (engine != null && ttsReady) { speak(engine, text); return }
+        reading = true // shows "Reading aloud" while the engine starts
+        tts = android.speech.tts.TextToSpeech(getApplication()) { status ->
+            val started = tts
+            if (status != android.speech.tts.TextToSpeech.SUCCESS || started == null) {
+                reading = false
+                readError = tx["ttsMissing"]
+                return@TextToSpeech
+            }
+            ttsReady = true
+            started.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() {
+                override fun onStart(utteranceId: String?) {}
+                override fun onDone(utteranceId: String?) { if (utteranceId == LAST_UTTERANCE) reading = false }
+                @Deprecated("Deprecated in Java")
+                override fun onError(utteranceId: String?) { reading = false }
+            })
+            if (reading) speak(started, text) // not cancelled while the engine was starting
+        }
+    }
+
+    private fun speak(engine: android.speech.tts.TextToSpeech, text: String) {
+        // The AI writes its explanations in English; an Indian English voice reads names and medicines best.
+        val voices = listOf(java.util.Locale("en", "IN"), java.util.Locale.UK, java.util.Locale.US)
+        val ok = voices.any { engine.setLanguage(it) >= android.speech.tts.TextToSpeech.LANG_AVAILABLE }
+        if (!ok) { reading = false; readError = tx["ttsNoVoice"]; return }
+        engine.setSpeechRate(0.9f) // a little slower than normal: easier to follow
+        // The engine takes a limited length at once, so it is fed sentence by sentence.
+        val sentences = text.split(Regex("(?<=[.!?])\\s+")).filter { it.isNotBlank() }
+        reading = true
+        sentences.forEachIndexed { i, sentence ->
+            val mode = if (i == 0) android.speech.tts.TextToSpeech.QUEUE_FLUSH else android.speech.tts.TextToSpeech.QUEUE_ADD
+            engine.speak(sentence, mode, null, if (i == sentences.lastIndex) LAST_UTTERANCE else "s$i")
+        }
+    }
+
+    /** Stops speaking: the button was tapped again, the section changed, or the app went to the background. */
+    fun stopReading() {
+        tts?.stop()
+        reading = false
+    }
+
+    override fun onCleared() {
+        tts?.shutdown()
+        tts = null
+        super.onCleared()
+    }
+
     // ---------- Today ----------
     val todayLabel: String get() = LocalDate.now().format(java.time.format.DateTimeFormatter.ofPattern("EEE, d MMM", java.util.Locale.ENGLISH))
 
@@ -972,8 +1054,9 @@ class MedSureViewModel(app: Application) : AndroidViewModel(app) {
     private fun JSONObject.int(key: String): Int? = if (isNull(key)) null else getInt(key)
 
     private fun docJson(d: UploadedDoc) =
-        JSONObject().put("uri", d.uri.toString()).put("name", d.name).put("size", d.sizeBytes).put("mime", d.mimeType)
-    private fun docOf(o: JSONObject) = UploadedDoc(Uri.parse(o.getString("uri")), o.getString("name"), o.getLong("size"), o.getString("mime"))
+        JSONObject().put("uri", d.uri.toString()).put("name", d.name).put("size", d.sizeBytes).put("mime", d.mimeType).put("ocr", d.ocrText)
+    private fun docOf(o: JSONObject) =
+        UploadedDoc(Uri.parse(o.getString("uri")), o.getString("name"), o.getLong("size"), o.getString("mime"), o.str("ocr"))
     private fun <T> JSONArray.mapObjects(f: (JSONObject) -> T): List<T> = List(length()) { f(getJSONObject(it)) }
 
     private fun snapshot(): JSONObject = JSONObject()

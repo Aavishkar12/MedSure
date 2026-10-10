@@ -341,6 +341,8 @@ private fun Step3BillsAndInsurance(vm: MedSureViewModel) {
             vm.onbInsDoc = queryDocInfo(context, uri)
         }
     }
+    var policyScanError by remember { mutableStateOf<String?>(null) }
+    val scanPolicy = rememberDocumentScanner(onScanned = { policyScanError = null; vm.onbInsDoc = it }, onError = { policyScanError = it })
 
     Column(Modifier.fillMaxSize()) {
         Column(
@@ -392,6 +394,16 @@ private fun Step3BillsAndInsurance(vm: MedSureViewModel) {
                 ) {
                     singlePicker.launch(arrayOf("application/pdf", "image/jpeg", "image/png"))
                 }
+                MsButton(
+                    text = "Scan policy with camera",
+                    kind = BtnKind.Ghost,
+                    modifier = Modifier.fillMaxWidth(),
+                    icon = LineIcons.Camera,
+                    borderColor = Ms.Teal,
+                    textColor = Ms.Teal,
+                    onClick = scanPolicy,
+                )
+                policyScanError?.let { T(it, 13, 400, Ms.Red, lh = 1.4f) }
 
                 // Show chosen policy file if present
                 vm.onbInsDoc?.let { doc ->
@@ -568,6 +580,9 @@ fun DocumentUploadSection(
         }
     }
 
+    var scanError by remember { mutableStateOf<String?>(null) }
+    val scan = rememberDocumentScanner(onScanned = { scanError = null; onAddDocs(listOf(it)) }, onError = { scanError = it })
+
     Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(12.dp)) {
         // Upload document card
         UploadOptionCard(
@@ -581,15 +596,16 @@ fun DocumentUploadSection(
             },
         )
 
-        // Use camera dummy card (tactile press effect, does nothing)
+        // Opens the camera scanner: finds the page, straightens it, and takes several pages into one PDF.
         UploadOptionCard(
             title = "Use camera",
-            sub = "Take a photo of a page",
+            sub = "Scan the pages of a paper document",
             badgeBg = Ms.Teal,
             badgeFg = Color.White,
             icon = LineIcons.Camera,
-            onClick = { /* DUMMY: does nothing */ },
+            onClick = scan,
         )
+        scanError?.let { T(it, 13, 400, Ms.Red, lh = 1.4f) }
 
         // Selected files list
         if (docs.isNotEmpty()) {

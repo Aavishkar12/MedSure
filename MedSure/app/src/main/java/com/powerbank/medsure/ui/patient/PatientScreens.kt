@@ -312,7 +312,11 @@ fun CareScreen(vm: MedSureViewModel) {
             if (vm.reading) t["reading"] else t["readAloud"],
             if (vm.reading) BtnKind.Primary else BtnKind.Light,
             Modifier.fillMaxWidth(), icon = LineIcons.Volume,
-        ) { vm.reading = !vm.reading }
+        ) { vm.toggleReadAloud() }
+        vm.readError?.let { T(it, 13, 400, Ms.Red, lh = 1.4f) }
+        // Changing section, or leaving this screen, stops the voice.
+        androidx.compose.runtime.LaunchedEffect(vm.care) { if (vm.reading) vm.stopReading() }
+        androidx.compose.runtime.DisposableEffect(Unit) { onDispose { vm.stopReading() } }
     }
 }
 
