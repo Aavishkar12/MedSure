@@ -78,6 +78,9 @@ dependencies {
     implementation("com.google.maps.android:maps-compose:5.0.0")
     implementation("com.google.android.gms:play-services-location:21.3.0")
     implementation("com.google.android.libraries.places:places:3.5.0")
+    // Camera document scanner and on-phone text reading. Both run inside Google Play services.
+    implementation("com.google.android.gms:play-services-mlkit-document-scanner:16.0.0-beta1")
+    implementation("com.google.android.gms:play-services-mlkit-text-recognition:19.0.1")
 
     implementation(platform("com.google.firebase:firebase-bom:33.7.0"))
     implementation("com.google.firebase:firebase-auth")

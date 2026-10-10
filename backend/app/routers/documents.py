@@ -70,10 +70,17 @@ def _previous(session: Session, doc: Document, model):
 
 
 def _llm_inputs(doc: Document, text: str, method: str) -> tuple[str, list[bytes]]:
-    """Clean text alone when there is some; page images (with any Tesseract text) for scans and photos."""
-    if text and method in ("text_layer", "device_ocr"):
+    """
+    Clean text alone when the document has a text layer. For scans and photos, the page images with
+    whatever OCR text there is (from the phone or Tesseract) as a hint.
+    The vision model only sees the first few pages, so a longer scan that already has OCR text for
+    every page is read from that text instead: no page is silently dropped.
+    """
+    if text and method == "text_layer":
         return text, []
     images = llm.file_to_images(doc.path) if doc.path and Path(doc.path).suffix.lower() != ".txt" else []
+    if text and method == "device_ocr" and text.count("[Page ") > len(images):
+        return text, []
     if images:
         return text, images
     if text:

@@ -145,6 +145,10 @@ object Backend {
                         part("Content-Disposition: form-data; name=\"doc_type\"")
                         out.write("$docType$crlf".toByteArray())
                     }
+                    doc.ocrText?.takeIf { it.isNotBlank() }?.let { text ->
+                        part("Content-Disposition: form-data; name=\"ocr_text\"${crlf}Content-Type: text/plain; charset=utf-8")
+                        out.write(text.toByteArray(Charsets.UTF_8)); out.write(crlf.toByteArray())
+                    }
                     val name = doc.name.replace("\"", "'")
                     part("Content-Disposition: form-data; name=\"file\"; filename=\"$name\"${crlf}Content-Type: ${doc.mimeType.ifBlank { "application/octet-stream" }}")
                     val input = context.contentResolver.openInputStream(doc.uri)

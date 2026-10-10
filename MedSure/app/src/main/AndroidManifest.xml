@@ -7,6 +7,13 @@
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- "Read this aloud" uses the phone's text-to-speech engine; Android 11+ only shows it to apps that ask. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE" />
+        </intent>
+    </queries>
+
     <!-- usesCleartextTraffic lets the app reach a backend on a laptop over http. Remove once the API is only https. -->
     <application
         android:allowBackup="true"
@@ -16,6 +23,10 @@
         android:usesCleartextTraffic="true"
         android:theme="@style/Theme.MedSure">
 
+        <!-- Download the text-reading model when the app is installed, so the first scan does not wait for it. -->
+        <meta-data
+            android:name="com.google.mlkit.vision.DEPENDENCIES"
+            android:value="ocr" />
         <meta-data
             android:name="com.google.android.geo.API_KEY"
             android:value="${MAPS_API_KEY}" />

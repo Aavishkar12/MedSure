@@ -6,6 +6,10 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -31,7 +35,13 @@ fun AddPapersButton(vm: MedSureViewModel, docType: String? = null, kind: BtnKind
         if (vm.addingDocs) t["addingPapers"] else t["addPapers"], kind, modifier.fillMaxWidth(),
         enabled = !vm.addingDocs, icon = LineIcons.Paperclip, height = 46.dp,
     ) { picker.launch(PAPER_TYPES) }
-    vm.addDocsError?.let { T(it, 13, 400, Ms.Red, lh = 1.4f) }
+    var scanError by remember { mutableStateOf<String?>(null) }
+    val scan = rememberDocumentScanner(
+        onScanned = { scanError = null; vm.addDocuments(context, listOf(it), docType) },
+        onError = { scanError = it },
+    )
+    if (!vm.addingDocs) MsButton(t["scanPapers"], BtnKind.Light, modifier.fillMaxWidth(), icon = LineIcons.Camera, height = 46.dp, onClick = scan)
+    (scanError ?: vm.addDocsError)?.let { T(it, 13, 400, Ms.Red, lh = 1.4f) }
 }
 
 /** Shown while the case has no documents yet: everything in the app is built from the patient's own papers. */
