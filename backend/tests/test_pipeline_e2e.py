@@ -12,9 +12,7 @@ from app.config import settings
 
 
 @pytest.fixture(scope="module", autouse=True)
-def setup_test_db(tmp_path_factory):
-    # Its own folder: other test files use in-memory databases whose case ids also start at 1.
-    settings.extractions_dir = str(tmp_path_factory.mktemp("e2e_extractions"))
+def setup_test_db():
     settings.auth_dev_bypass = True
     init_db()
 
